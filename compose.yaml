@@ -1,0 +1,88 @@
+name: deepsnout
+x-app: &app
+  build: .
+  image: deepsnout:local
+  environment: &environment
+    DEEPSNOUT_DATA_DIR: /var/lib/deepsnout
+    DEEPSNOUT_POSTGRES_HOST: db
+    DEEPSNOUT_ALLOWED_HOSTS: ${DEEPSNOUT_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
+    DEEPSNOUT_SECURE_COOKIES: ${DEEPSNOUT_SECURE_COOKIES:-0}
+  volumes:
+    - app-secrets:/var/lib/deepsnout:ro
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+services:
+  secrets:
+    build: .
+    image: deepsnout:local
+    user: "0:0"
+    command: [secrets]
+    environment:
+      DEEPSNOUT_DATA_DIR: /var/lib/deepsnout
+      DEEPSNOUT_DB_SECRET_EXPORT: /export/password
+      DEEPSNOUT_CHOWN_UID: "10001"
+    volumes:
+      - app-secrets:/var/lib/deepsnout
+      - db-secret:/export
+    read_only: true
+    restart: "no"
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: deepsnout
+      POSTGRES_PASSWORD_FILE: /run/deepsnout-db/admin_password
+    volumes:
+      - database:/var/lib/postgresql/data
+      - db-secret:/run/deepsnout-db:ro
+      - ./deployment/postgres-init.sh:/docker-entrypoint-initdb.d/001-app.sh:ro
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U deepsnout -d deepsnout"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  init:
+    <<: *app
+    command: [init]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:${DEEPSNOUT_PORT:-8080}:8000"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+  worker:
+    <<: *app
+    command: [worker]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, deepsnout, worker-health]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+volumes:
+  app-secrets:
+  db-secret:
+  database:

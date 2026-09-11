@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77,<83"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "deepsnout"
+version = "0.1.0a1"
+description = "Local-first behavioral security analytics"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{name = "DeepSnout contributors"}]
+dependencies = [
+  "fastapi==0.141.1", "starlette==1.6.0", "uvicorn==0.48.0",
+  "SQLAlchemy==2.0.50", "psycopg[binary]==3.3.5", "Jinja2==3.1.6",
+  "httpx==0.28.1", "argon2-cffi==25.1.0", "cryptography==46.0.4",
+  "defusedxml==0.7.1", "python-multipart==0.0.29",
+]
+[project.optional-dependencies]
+test = ["pytest==9.0.2", "pytest-cov==7.0.0"]
+[project.scripts]
+deepsnout = "deepsnout.cli:main"
+[tool.setuptools.packages.find]
+include = ["deepsnout*"]
+[tool.setuptools.package-data]
+deepsnout = ["templates/*.html", "static/*"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

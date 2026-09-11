@@ -1,0 +1,54 @@
+name: tests-and-container
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        database: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_USER: deepsnout
+          POSTGRES_PASSWORD: isolated-ci-test-password
+          POSTGRES_DB: deepsnout_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U deepsnout -d deepsnout_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: sudo apt-get update && sudo apt-get install -y libpsl5
+      - run: pip install -e '.[test]'
+      - if: matrix.database == 'postgres'
+        run: echo 'DEEPSNOUT_TEST_DATABASE_URL=postgresql+psycopg://deepsnout:isolated-ci-test-password@localhost:5432/deepsnout_test' >> "$GITHUB_ENV"
+      - run: python -m pytest --cov=deepsnout --cov-report=term-missing -W error::sqlalchemy.exc.SAWarning
+      - run: pip freeze
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - run: docker compose up --build -d
+      - name: Smoke-test startup
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://localhost:8080/healthz; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/healthz
+          curl -fsS http://localhost:8080/setup | grep -q 'setup_token'
+          docker compose exec -T web deepsnout version
+          docker compose exec -T web deepsnout setup-token | python tools/compose_smoke.py
+      - name: Logs
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
