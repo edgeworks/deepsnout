@@ -44,5 +44,18 @@ def test_db_admin_secret_separate_from_app(monkeypatch,config,tmp_path):
     assert export.read_text()==(config.data_dir/'db_password').read_text()
     admin=(export.parent/'admin_password').read_text()
     assert admin!=export.read_text() and not (config.data_dir/'admin_password').exists()
+    before = export.stat().st_mtime_ns
     invoke(monkeypatch,config,'secrets')
+    assert export.stat().st_mtime_ns == before
     assert (export.parent/'admin_password').read_text()==admin
+
+
+def test_db_export_mismatch_is_not_silently_overwritten(monkeypatch,config,tmp_path):
+    export = tmp_path/'db-only'/'password'
+    export.parent.mkdir()
+    export.write_text('unrelated-existing-secret')
+    export.chmod(0o444)
+    monkeypatch.setenv('DEEPSNOUT_DB_SECRET_EXPORT',str(export))
+    with pytest.raises(RuntimeError, match='does not match'):
+        invoke(monkeypatch,config,'secrets')
+    assert export.read_text() == 'unrelated-existing-secret'

@@ -30,10 +30,13 @@ def main():
             from pathlib import Path
             target = Path(destination)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text((config.data_dir / "db_password").read_text())
+            from .security import create_secret
+            password = (config.data_dir / "db_password").read_text()
+            create_secret(target, password)
+            if target.read_text() != password:
+                raise RuntimeError("DB password export does not match application secret; restore consistent secret volumes")
             target.chmod(0o444)
             import secrets
-            from .security import create_secret
             admin = target.parent / "admin_password"
             create_secret(admin, secrets.token_urlsafe(36))
             admin.chmod(0o444)

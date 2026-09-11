@@ -2,7 +2,7 @@
 
 ## Executed locally
 
-106 tests passed. 88% statement coverage in the publication recheck. The run treats
+107 tests passed. 88% statement coverage in the publication recheck. The run treats
 SQLAlchemy SAWarning as an error, including the repeated demo-removal/reload
 regression. Tests exercise safe parsing, source time/identity, replay handling,
 peer qualification, same-day exclusion, scoped expectations, capacities, retention,
@@ -36,10 +36,12 @@ be installed here because package-download networking was unavailable. Therefore
 **the exact pinned container dependency combination is not locally validated**.
 The provided CI installs that combination and must pass before wider deployment.
 
-No Docker daemon, PostgreSQL server or real Splunk environment was available here.
-Compose YAML and the database bootstrap shell script were checked structurally,
-not executed as containers. PostgreSQL role initialization, its upsert/locking
-paths and the full container first-run sequence are awaiting CI/live verification.
+No Docker daemon, PostgreSQL server or real Splunk environment was available in
+this local environment. The first GitHub Actions run on 11 September 2026 DID build
+and start Compose, initialize PostgreSQL and complete the GUI setup/login/demo/
+removal smoke test successfully. The separate unit-test job exposed a repeat
+secret-export permission bug under a non-root user; that has been fixed. Follow
+the latest Actions run for the full SQLite/PostgreSQL suite result.
 Mock Splunk contract tests are not a live-server compatibility test.
 
 The original publication was denied with HTTP403. Repository access has since
@@ -74,4 +76,10 @@ strings. Regression tests cover arrays, objects, escaped strings and `_raw`.
 The latest raw test output is in `docs/test-output.txt`. Three SQLite connection
 ResourceWarnings remain in the test harness; no SQLAlchemy SAWarning was allowed.
 The release source omits generated screenshots and the empty benchmark output;
-application functionality is unchanged apart from the parser hardening.
+The first CI run also identified a second-run secret initializer attempting to
+rewrite a read-only export file. It now creates the file only when absent,
+verifies existing contents, and refuses mismatched secret volumes rather than
+silently rotating a live database credential. Regression tests check unchanged
+file modification time and mismatch refusal. All 107 local tests also passed
+under an unprivileged user (not just root). Both CI matrix variants now run to
+completion independently rather than cancelling the other on one failure.

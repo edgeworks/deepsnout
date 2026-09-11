@@ -1,21 +1,21 @@
 ........................................................................ [ 67%]
-..................................                                       [100%]
+...................................                                      [100%]
 =============================== warnings summary ===============================
-tests/test_cli.py::test_password_recovery
-  /opt/pyvenv/lib/python3.13/site-packages/sqlalchemy/sql/selectable.py:4812: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7f8d34a417b0>
-    @classmethod
+tests/test_cli.py::test_missing_worker_heartbeat
+  /opt/pyvenv/lib/python3.13/site-packages/sqlalchemy/sql/annotation.py:108: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7f52a6178040>
+    for key in sorted(self._annotations)
   Enable tracemalloc to get traceback where the object was allocated.
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
 
 tests/test_engine.py::test_demo_real_pipeline_and_replay
-  /usr/lib/python3.13/re/_parser.py:260: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7f8d34a254e0>
-    def get(self):
+  /opt/pyvenv/lib/python3.13/site-packages/sqlalchemy/orm/persistence.py:351: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7f52a6270f40>
+    for propkey in set(propkey_to_col).intersection(state_dict):
   Enable tracemalloc to get traceback where the object was allocated.
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
 
 tests/test_engine.py::test_demo_real_pipeline_and_replay
-  /opt/pyvenv/lib/python3.13/site-packages/sqlalchemy/sql/visitors.py:126: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7f8d34b38c70>
-    def _compiler_dispatch(
+  /opt/pyvenv/lib/python3.13/site-packages/sqlalchemy/orm/persistence.py:351: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x7f52a6162f20>
+    for propkey in set(propkey_to_col).intersection(state_dict):
   Enable tracemalloc to get traceback where the object was allocated.
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
 
@@ -26,7 +26,7 @@ _______________ coverage: platform linux, python 3.13.5-final-0 ________________
 Name                     Stmts   Miss  Cover   Missing
 ------------------------------------------------------
 deepsnout/__init__.py        1      0   100%
-deepsnout/cli.py            81     16    80%   41-45, 51-55, 61-63, 71, 74, 79, 87
+deepsnout/cli.py            84     16    81%   44-48, 54-58, 64-66, 74, 77, 82, 90
 deepsnout/config.py         41      4    90%   27, 44, 46-47
 deepsnout/db.py            192      1    99%   219
 deepsnout/demo.py           20      0   100%
@@ -38,5 +38,5 @@ deepsnout/splunk.py        204     23    89%   44, 59, 66, 73, 117, 136, 141, 14
 deepsnout/web.py           487     78    84%   49-50, 68, 119, 122, 127, 155, 164, 167, 172, 181, 191, 195, 219-220, 222, 244, 251, 254, 257-259, 269, 279, 299-304, 316, 343, 365, 369-373, 379, 389-398, 415, 441, 445, 455-464, 485-492, 508, 518-525, 547
 deepsnout/worker.py        157     50    68%   35-46, 68, 74, 80, 95, 102, 123, 147-168, 172-183
 ------------------------------------------------------
-TOTAL                     1801    213    88%
-106 passed, 3 warnings in 7.95s
+TOTAL                     1804    213    88%
+107 passed, 3 warnings in 8.13s
