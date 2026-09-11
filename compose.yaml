@@ -30,7 +30,10 @@ services:
     read_only: true
     restart: "no"
   db:
-    image: postgres:17-bookworm
+    build:
+      context: .
+      dockerfile: deployment/postgres.Dockerfile
+    image: deepsnout-postgres:local
     environment:
       POSTGRES_USER: postgres
       POSTGRES_DB: deepsnout
@@ -38,12 +41,11 @@ services:
     volumes:
       - database:/var/lib/postgresql/data
       - db-secret:/run/deepsnout-db:ro
-      - ./deployment/postgres-init.sh:/docker-entrypoint-initdb.d/001-app.sh:ro
     depends_on:
       secrets:
         condition: service_completed_successfully
     healthcheck:
-      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U deepsnout -d deepsnout"]
+      test: [CMD, sh, /usr/local/bin/deepsnout-db-healthcheck]
       interval: 5s
       timeout: 5s
       retries: 30
