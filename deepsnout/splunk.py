@@ -143,15 +143,39 @@ def boolish(v):
     return str(v).lower() in {"1", "true"}
 
 
-def peer_sha256(response):
-    """Return SHA-256 of the leaf certificate on an HTTPX HTTPS response."""
+def peer_certificate(response):
+    """Return the DER leaf certificate from an HTTPX HTTPS response."""
     stream = response.extensions.get("network_stream")
     getter = getattr(stream, "get_extra_info", None)
     ssl_object = getter("ssl_object") if getter else None
     certificate = ssl_object.getpeercert(True) if ssl_object else None
     if not certificate:
         raise SplunkError("Could not inspect the Splunk TLS peer certificate")
-    return hashlib.sha256(certificate).hexdigest()
+    return certificate
+
+
+def peer_sha256(response):
+    return hashlib.sha256(peer_certificate(response)).hexdigest()
+
+
+def pinned_context(certificate):
+    """Trust only the already-verified leaf and deliberately skip host-name matching.
+
+    VERIFY_X509_PARTIAL_CHAIN allows an end-entity certificate to be the configured
+    trust anchor. Unlike CERT_NONE, every later TLS handshake must therefore chain
+    to that exact pinned leaf before an HTTP Authorization header can be sent.
+    """
+    if not hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+        raise SplunkError("This Python/OpenSSL build cannot enforce pinned certificate mode")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_REQUIRED
+    try:
+        context.load_verify_locations(cadata=ssl.DER_cert_to_PEM_cert(certificate))
+    except ssl.SSLError:
+        raise SplunkError("Could not load the verified Splunk leaf certificate") from None
+    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    return context
 
 
 class SplunkClient:
@@ -162,9 +186,13 @@ class SplunkClient:
         if settings.tls_mode == "pinned" and parsed.scheme != "https":
             raise ValueError("Pinned certificate mode requires HTTPS")
         self._pin = settings.cert_sha256 if settings.tls_mode == "pinned" else ""
-        if self._pin:
-            # Identity is the exact leaf certificate fingerprint. The first request
-            # carries no credential; only after the pin matches do we add auth.
+        timeout = httpx.Timeout(30, connect=10)
+        limits = httpx.Limits(max_connections=2, max_keepalive_connections=2, keepalive_expiry=180)
+        if self._pin and transport is None:
+            context = self._pin_preflight(timeout, limits)
+        elif self._pin:
+            # Test transports do not expose a real TLS socket. Runtime pinned mode
+            # always uses the preflight path above.
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
@@ -173,12 +201,9 @@ class SplunkClient:
             if settings.ca_pem:
                 context.load_verify_locations(cadata=settings.ca_pem)
         self.client = httpx.Client(base_url=self.url, verify=context,
-            headers={"User-Agent": "DeepSnout/0.1"},
-            timeout=httpx.Timeout(30, connect=10), follow_redirects=False, transport=transport,
-            limits=httpx.Limits(max_connections=2, max_keepalive_connections=2, keepalive_expiry=180))
-        if self._pin and transport is None:
-            self._pin_preflight()
-        self.client.headers["Authorization"] = settings.auth_scheme + " " + credential
+            headers={"Authorization": settings.auth_scheme + " " + credential,
+                     "User-Agent": "DeepSnout/0.1"},
+            timeout=timeout, follow_redirects=False, transport=transport, limits=limits)
         self.sleep = sleep
 
     def _verify_pin(self, response):
@@ -187,20 +212,28 @@ class SplunkClient:
             if not hmac.compare_digest(actual, self._pin):
                 raise SplunkError("Splunk TLS certificate fingerprint mismatch; credential was not accepted for this peer")
 
-    def _pin_preflight(self):
-        """Verify the exact leaf cert before adding Authorization to the client."""
+    def _pin_preflight(self, timeout, limits):
+        """Verify the leaf without credentials, then make it the sole TLS trust anchor."""
+        bootstrap = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        bootstrap.check_hostname = False
+        bootstrap.verify_mode = ssl.CERT_NONE
         try:
-            with self.client.stream("GET", "/services/server/info", params={"output_mode": "json"}) as response:
-                self._verify_pin(response)
-                # Consume the small unauthenticated response so HTTPX can reuse the
-                # verified TLS connection for the credential-bearing request.
-                total = 0
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > 1024 * 1024:
-                        raise SplunkError("Splunk pin preflight response exceeded 1 MiB")
+            with httpx.Client(base_url=self.url, verify=bootstrap,
+                    headers={"User-Agent": "DeepSnout/0.1"}, timeout=timeout,
+                    follow_redirects=False, limits=limits) as client:
+                with client.stream("GET", "/services/server/info", params={"output_mode": "json"}) as response:
+                    certificate = peer_certificate(response)
+                    actual = hashlib.sha256(certificate).hexdigest()
+                    if not hmac.compare_digest(actual, self._pin):
+                        raise SplunkError("Splunk TLS certificate fingerprint mismatch; no credential was sent")
+                    total = 0
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > 1024 * 1024:
+                            raise SplunkError("Splunk pin preflight response exceeded 1 MiB")
         except httpx.HTTPError:
             raise SplunkError("Splunk transport/TLS failure during certificate pin verification") from None
+        return pinned_context(certificate)
 
     def close(self):
         self.client.close()
