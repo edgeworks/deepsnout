@@ -65,6 +65,16 @@ def test_invalid_supported_cannot_skip():
     client.close()
 
 
+def test_explicit_malformed_tolerance_allows_pilot_progress():
+    client,_=client_for([raw_event(),{'EventCode':'3'},raw_event(n=2)])
+    client.settings.malformed_tolerance=1
+    events,report=client.query(100,200)
+    assert len(events)==2
+    assert report['invalid']==1 and report['tolerated_malformed']==1
+    assert 'checkpoint advanced' in report['warning']
+    client.close()
+
+
 def test_other_sysmon_types_counted():
     client,_=client_for([raw_event(7)])
     events,report=client.query(100,200)
@@ -94,6 +104,7 @@ def test_private_sources_ca_validation_and_no_arbitrary_spl():
     assert validate_url('https://10.1.2.3:8089/')=='https://10.1.2.3:8089'
     with pytest.raises(ValueError): SplunkSettings(url='https://host',indexes='wef',ca_pem='not a certificate')
     with pytest.raises(ValueError): SplunkSettings(url='https://host',indexes='wef | delete')
+    with pytest.raises(ValueError): SplunkSettings(url='https://host',indexes='wef',malformed_tolerance=1001)
 
 
 def test_remote_error_does_not_echo_secrets():
