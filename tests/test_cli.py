@@ -1,6 +1,6 @@
 import pytest
 from sqlalchemy import select
-from deepsnout import cli
+from deepsnout import cli, __version__
 from deepsnout.db import transaction,User,LoginSession
 from deepsnout.security import PASSWORDS,check_password
 
@@ -17,7 +17,7 @@ def test_cli_secrets_and_version(monkeypatch,config,capsys):
     assert (config.data_dir/'app_key').stat().st_mode & 0o077 == 0
     invoke(monkeypatch,config,'setup-token')
     assert (config.data_dir/'setup_token').read_text() in capsys.readouterr().out
-    invoke(monkeypatch,config,'version'); assert '0.1.0a1' in capsys.readouterr().out
+    invoke(monkeypatch,config,'version'); assert capsys.readouterr().out.strip() == __version__
 
 
 def test_password_recovery(monkeypatch,engine,config):
