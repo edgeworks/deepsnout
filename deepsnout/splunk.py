@@ -2,6 +2,8 @@
 
 Bounded index-time slices, complete pagination, then transactional cursor commit.
 """
+import hashlib
+import hmac
 import ipaddress
 import fnmatch
 import json
@@ -10,17 +12,20 @@ import ssl
 import time
 from urllib.parse import urlsplit, quote
 import httpx
-from pydantic import BaseModel, Field, field_validator
-from .normalize import normalize, InvalidEvent, UnsupportedEvent
+from pydantic import BaseModel, Field, field_validator, model_validator
+from .normalize import normalize, InvalidEvent, UnsupportedEvent, EVENT_FORMATS
 
 
 class SplunkSettings(BaseModel):
     url: str
     indexes: str
     sourcetype: str = "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+    event_format: str = "auto"
     computer_pattern: str = "*"
     default_cohort: str = "unassigned"
     auth_scheme: str = "Bearer"
+    tls_mode: str = "strict"
+    cert_sha256: str = ""
     ca_pem: str = ""
     interval: int = Field(60, ge=15, le=3600)
     window: int = Field(60, ge=1, le=3600)
@@ -59,11 +64,35 @@ class SplunkSettings(BaseModel):
             raise ValueError("Invalid sourcetype; only a name or wildcard pattern is accepted")
         return value
 
+    @field_validator("event_format")
+    @classmethod
+    def payload_format(cls, value):
+        value = value.lower().strip()
+        if value not in EVENT_FORMATS:
+            raise ValueError("Select Auto, XML or JSON event payload format")
+        return value
+
     @field_validator("auth_scheme")
     @classmethod
     def scheme(cls, value):
         if value not in {"Bearer", "Splunk"}:
             raise ValueError("Select Bearer token or Splunk session key")
+        return value
+
+    @field_validator("tls_mode")
+    @classmethod
+    def trust_mode(cls, value):
+        value = value.lower().strip()
+        if value not in {"strict", "pinned"}:
+            raise ValueError("Select strict TLS verification or pinned certificate mode")
+        return value
+
+    @field_validator("cert_sha256")
+    @classmethod
+    def fingerprint(cls, value):
+        value = re.sub(r"[:\s]", "", value.strip()).lower()
+        if value and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("Pinned certificate fingerprint must be a SHA-256 fingerprint")
         return value
 
     @field_validator("ca_pem")
@@ -77,6 +106,12 @@ class SplunkSettings(BaseModel):
             except ssl.SSLError:
                 raise ValueError("Invalid PEM CA certificate bundle") from None
         return value.strip()
+
+    @model_validator(mode="after")
+    def pin_required(self):
+        if self.tls_mode == "pinned" and not self.cert_sha256:
+            raise ValueError("Pinned certificate mode requires a SHA-256 leaf certificate fingerprint")
+        return self
 
 
 def validate_url(url, allow_http=False):
@@ -108,17 +143,64 @@ def boolish(v):
     return str(v).lower() in {"1", "true"}
 
 
+def peer_sha256(response):
+    """Return SHA-256 of the leaf certificate on an HTTPX HTTPS response."""
+    stream = response.extensions.get("network_stream")
+    getter = getattr(stream, "get_extra_info", None)
+    ssl_object = getter("ssl_object") if getter else None
+    certificate = ssl_object.getpeercert(True) if ssl_object else None
+    if not certificate:
+        raise SplunkError("Could not inspect the Splunk TLS peer certificate")
+    return hashlib.sha256(certificate).hexdigest()
+
+
 class SplunkClient:
     def __init__(self, settings, credential, *, allow_http=False, transport=None, sleep=time.sleep):
         self.settings = settings
         self.url = validate_url(settings.url, allow_http)
-        context = ssl.create_default_context()
-        if settings.ca_pem:
-            context.load_verify_locations(cadata=settings.ca_pem)
+        parsed = urlsplit(self.url)
+        if settings.tls_mode == "pinned" and parsed.scheme != "https":
+            raise ValueError("Pinned certificate mode requires HTTPS")
+        self._pin = settings.cert_sha256 if settings.tls_mode == "pinned" else ""
+        if self._pin:
+            # Identity is the exact leaf certificate fingerprint. The first request
+            # carries no credential; only after the pin matches do we add auth.
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        else:
+            context = ssl.create_default_context()
+            if settings.ca_pem:
+                context.load_verify_locations(cadata=settings.ca_pem)
         self.client = httpx.Client(base_url=self.url, verify=context,
-            headers={"Authorization": settings.auth_scheme + " " + credential, "User-Agent": "DeepSnout/0.1"},
-            timeout=httpx.Timeout(30, connect=10), follow_redirects=False, transport=transport)
+            headers={"User-Agent": "DeepSnout/0.1"},
+            timeout=httpx.Timeout(30, connect=10), follow_redirects=False, transport=transport,
+            limits=httpx.Limits(max_connections=2, max_keepalive_connections=2, keepalive_expiry=180))
+        if self._pin and transport is None:
+            self._pin_preflight()
+        self.client.headers["Authorization"] = settings.auth_scheme + " " + credential
         self.sleep = sleep
+
+    def _verify_pin(self, response):
+        if self._pin:
+            actual = peer_sha256(response)
+            if not hmac.compare_digest(actual, self._pin):
+                raise SplunkError("Splunk TLS certificate fingerprint mismatch; credential was not accepted for this peer")
+
+    def _pin_preflight(self):
+        """Verify the exact leaf cert before adding Authorization to the client."""
+        try:
+            with self.client.stream("GET", "/services/server/info", params={"output_mode": "json"}) as response:
+                self._verify_pin(response)
+                # Consume the small unauthenticated response so HTTPX can reuse the
+                # verified TLS connection for the credential-bearing request.
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > 1024 * 1024:
+                        raise SplunkError("Splunk pin preflight response exceeded 1 MiB")
+        except httpx.HTTPError:
+            raise SplunkError("Splunk transport/TLS failure during certificate pin verification") from None
 
     def close(self):
         self.client.close()
@@ -127,6 +209,7 @@ class SplunkClient:
         kwargs = {"params": data} if method == "GET" else {"data": data}
         try:
             with self.client.stream(method, path, **kwargs) as response:
+                self._verify_pin(response)
                 if response.status_code >= 300:
                     raise SplunkError(f"Splunk returned HTTP {response.status_code}; verify URL, permissions, certificate and token")
                 body = bytearray()
@@ -138,7 +221,7 @@ class SplunkClient:
                     return {}
                 result = json.loads(body)
         except httpx.HTTPError:
-            raise SplunkError("Splunk transport/TLS failure; verify reachability, CA trust and proxy settings") from None
+            raise SplunkError("Splunk transport/TLS failure; verify reachability, CA trust, certificate pin and proxy settings") from None
         except (json.JSONDecodeError, UnicodeError, RecursionError):
             raise SplunkError("Splunk did not return valid JSON") from None
         if not isinstance(result, dict):
@@ -154,6 +237,7 @@ class SplunkClient:
             raise SplunkError("Server-info response did not identify a Splunk server")
         content = response["entry"][0].get("content", {})
         return {"connection": "authenticated", "version": str(content.get("version", "unknown")),
+                "tls": "leaf certificate pinned" if self._pin else "CA and hostname verified",
                 "note": "Server access verified; run Poll now to verify search permissions and parsing"}
 
     def query(self, start, end):
@@ -211,7 +295,7 @@ class SplunkClient:
                     raise SplunkError("Search pagination is incomplete or inconsistent; checkpoint not advanced")
                 for index, row in enumerate(records):
                     try:
-                        event = normalize(row)
+                        event = normalize(row, cfg.event_format)
                         if fnmatch.fnmatchcase(event.host, cfg.computer_pattern):
                             events.append(event)
                         else:
