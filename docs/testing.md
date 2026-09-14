@@ -1,11 +1,11 @@
-# Verification report - 0.1.0a4
+# Verification report - 0.1.0a5
 
 ## Automated verification
 
-The 0.1.0a4 feature code has passed the Python suite against SQLite and PostgreSQL
-for the Cribl flat-JSON parser fix. The final disposable Compose verification is
-tracked on the release-head workflow run; the source manifest is checked in CI so
-published integrity hashes cannot silently drift from tracked files.
+The 0.1.0a5 feature code is exercised by the Python suite against SQLite and
+PostgreSQL. The final disposable Compose verification is tracked on the
+release-head workflow run; the source manifest is checked in CI so published
+integrity hashes cannot silently drift from tracked files.
 
 The Compose job builds the Python, PostgreSQL and Caddy images, starts the complete
 stack, exports the generated DeepSnout Local CA root, verifies the HTTPS endpoint
@@ -23,16 +23,18 @@ python -m pytest --cov=deepsnout --cov-report=term-missing -W error::sqlalchemy.
 
 It covers safe parsing, source time/identity, XML and JSON Sysmon normalization,
 common Cribl Windows-event JSON layouts including the observed flat
-`sourceMachineID`/`Name`/`Task` shape, explicit payload-format enforcement,
+`sourceMachineID`/`Name`/`Guid`/`Task` shape, explicit payload-format enforcement,
 replay handling, peer qualification, same-day exclusion, scoped expectations,
 capacities, retention, Splunk source pagination/failure rollback, source TLS-pin
 configuration/fingerprint extraction, role/CSRF controls, command privacy,
 settings, account recovery, secret separation and GUI routes/decisions.
 
 The flat Cribl regression omits EventID exactly like the observed production
-sample. DeepSnout accepts Task as the event type only after provider/channel
-identity establishes Sysmon, and tests the same fallback for supported Event 3
-and Event 22 inputs.
+sample. DeepSnout accepts Task as the event type only after provider, channel or
+the exact Sysmon provider GUID establishes Sysmon. Additional regressions cover
+the same fallback for supported Event 3 and Event 22 inputs and verify that a flat
+non-Sysmon Windows provider in a mixed sourcetype is counted as ignored rather
+than malformed.
 
 The pinned-TLS implementation was also exercised during development against a
 local HTTPS server with a self-signed certificate whose hostname deliberately did
