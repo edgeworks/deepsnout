@@ -5,7 +5,7 @@ x-app: &app
   environment: &environment
     DEEPSNOUT_DATA_DIR: /var/lib/deepsnout
     DEEPSNOUT_POSTGRES_HOST: db
-    DEEPSNOUT_ALLOWED_HOSTS: ${DEEPSNOUT_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1],${DEEPSNOUT_PUBLIC_HOST:-localhost}}
+    DEEPSNOUT_ALLOWED_HOSTS: ${DEEPSNOUT_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]},${DEEPSNOUT_PUBLIC_HOST:-localhost}
     DEEPSNOUT_SECURE_COOKIES: ${DEEPSNOUT_SECURE_COOKIES:-1}
   volumes:
     - app-secrets:/var/lib/deepsnout:ro
