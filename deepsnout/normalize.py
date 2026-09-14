@@ -12,6 +12,9 @@ VERSION = "sysmon-v1"
 SUPPORTED = {1, 3, 22}
 GUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 EVENT_FORMATS = {"auto", "xml", "json"}
+SYSMON_PROVIDERS = {"microsoft-windows-sysmon", "sysmon"}
+SYSMON_CHANNEL = "microsoft-windows-sysmon/operational"
+SYSMON_PROVIDER_GUID = "5770385f-c22a-43e0-bf4c-06f5698ffbd9"
 
 
 class InvalidEvent(ValueError):
@@ -251,12 +254,16 @@ def object_fields(obj):
             fields.setdefault(dest, event[src])
     # Some Cribl Windows Event Log pipelines flatten the XML System block into
     # top-level keys. In that shape Name is the provider name and EventID may be
-    # omitted even though the original Sysmon Task remains present.
+    # omitted even though the original Windows Task remains present. Preserve the
+    # provider even when it is not Sysmon so a mixed Windows-event sourcetype can
+    # be ignored safely instead of being reported as malformed Sysmon.
     provider_name = clean_text(event.get("Name", ""))
     channel = clean_text(event.get("Channel", ""))
-    if provider_name.lower() in {"microsoft-windows-sysmon", "sysmon"}:
+    flat_system_shape = any(key in event for key in
+                            ("Task", "Guid", "Channel", "sourceMachineID", "SystemTime", "EventRecordID"))
+    if provider_name and flat_system_shape:
         fields.setdefault("Provider", provider_name)
-    elif channel.lower() == "microsoft-windows-sysmon/operational":
+    elif channel.lower() == SYSMON_CHANNEL:
         fields.setdefault("Provider", "Microsoft-Windows-Sysmon")
     message = event.get("Message")
     if isinstance(message, str):
@@ -368,21 +375,31 @@ def normalize(record, event_format="auto"):
                 return clean_text(v)
         return default
     provider = get("Provider", "ProviderName", "SourceName")
-    if provider and provider.lower() not in {"microsoft-windows-sysmon", "sysmon"}:
+    channel = get("Channel").lower()
+    provider_guid = get("Guid").lower().strip("{}")
+    provider_is_sysmon = provider.lower() in SYSMON_PROVIDERS
+    channel_is_sysmon = channel == SYSMON_CHANNEL
+    guid_is_sysmon = provider_guid == SYSMON_PROVIDER_GUID
+    if provider and not provider_is_sysmon:
         raise UnsupportedEvent("Not a Sysmon provider")
+    if not provider and channel and not channel_is_sysmon:
+        raise UnsupportedEvent("Not a Sysmon channel")
     eid_text = get("EventID", "EventCode", "Id", "event.code")
     inferred_from_task = False
     if not eid_text:
         task = get("Task")
-        channel = get("Channel").lower()
-        if task and (provider.lower() in {"microsoft-windows-sysmon", "sysmon"}
-                     or channel == "microsoft-windows-sysmon/operational"):
+        trusted_sysmon = provider_is_sysmon or channel_is_sysmon or guid_is_sysmon
+        if task and trusted_sysmon:
             eid_text = task
             inferred_from_task = True
+        elif task:
+            raise InvalidEvent("Missing Sysmon EventID/EventCode; Task present but Sysmon provider/channel/GUID markers absent")
+        else:
+            raise InvalidEvent("Missing Sysmon EventID/EventCode; no Task fallback field present")
     try:
         eid = int(eid_text)
     except ValueError:
-        raise InvalidEvent("Missing Sysmon EventID/EventCode and no trusted Sysmon Task fallback") from None
+        raise InvalidEvent("Invalid Sysmon EventID/EventCode or Task value") from None
     if eid not in SUPPORTED:
         raise UnsupportedEvent("Sysmon event type not implemented")
     host = get("Computer", "ComputerName", "MachineName", "sourceMachineID").lower().rstrip(".")
@@ -416,7 +433,7 @@ def normalize(record, event_format="auto"):
         parent_guid = ""
     if not image:
         warnings.append("No Image; application identity unavailable")
-    if not provider:
+    if not provider and not guid_is_sysmon:
         warnings.append("Provider absent; Sysmon origin assumed from configured source scope")
     if not guid:
         warnings.append("No ProcessGuid; no exact process correlation")
