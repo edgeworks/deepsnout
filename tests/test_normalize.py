@@ -184,6 +184,22 @@ def test_cribl_task_fallback_for_supported_sysmon_types(task,fields):
     assert e.event_id==task and e.host=="ws.example"
 
 
+def test_cribl_task_fallback_accepts_sysmon_provider_guid_without_name_or_channel():
+    raw={"sourceMachineID":"ws-guid.example","Guid":"'{5770385f-c22a-43e0-bf4c-06f5698ffbd9}'","Task":"3",
+         "UtcTime":"2026-09-14 11:57:36.233","ProcessGuid":"{00000000-0000-0000-0000-000000000001}",
+         "Image":r"C:\Windows\x.exe","DestinationIp":"8.8.8.8","DestinationPort":"443","Initiated":"true"}
+    e=normalize({"_raw":json.dumps(raw)},"json")
+    assert e.event_id==3 and e.host=="ws-guid.example" and e.port==443
+
+
+def test_cribl_mixed_windows_flat_provider_is_ignored_not_malformed():
+    raw={"sourceMachineID":"dc1.example","Name":"'Microsoft-Windows-Security-Auditing'",
+         "Guid":"'{54849625-5478-4994-a5ba-3e3b0328c30d}'","Task":"12544",
+         "Channel":"Security","SystemTime":"'2026-09-14T11:57:36.2358960Z'","EventRecordID":"42"}
+    events,report=parse_payload(json.dumps(raw))
+    assert events==[] and report["ignored"]==1 and report["invalid"]==0
+
+
 def test_explicit_event_format_rejects_switch():
     with pytest.raises(InvalidEvent,match="Configured JSON"):
         normalize({"_raw":XML},"json")
