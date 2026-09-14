@@ -21,17 +21,39 @@ superuser and cannot create other databases or roles.
 
 ## Network access
 
-Default HTTP is loopback-only. Use SSH tunneling for evaluation or a trusted TLS
-reverse proxy for shared operation. In .env:
+The Compose deployment publishes the web port on all host interfaces by default so
+headless servers can be initialized from an administrator workstation. DeepSnout
+still validates the HTTP Host header, so add the IP address and/or DNS name that
+operators will actually use. Copy `.env.example` to `.env`, replace the example
+address/name, and keep localhost for the internal health check:
+
+```dotenv
+DEEPSNOUT_BIND_ADDRESS=0.0.0.0
+DEEPSNOUT_PORT=8080
+DEEPSNOUT_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],10.20.30.40,deepsnout.example.org
+DEEPSNOUT_SECURE_COOKIES=0
+```
+
+For loopback-only behavior set `DEEPSNOUT_BIND_ADDRESS=127.0.0.1`. The bind
+address controls Docker's host listener; `DEEPSNOUT_ALLOWED_HOSTS` controls which
+Host headers the application accepts. List hostnames/IPs, not origins or ports;
+no wildcard is accepted.
+
+The first-run setup token prevents an unauthenticated visitor from claiming the
+instance, but it does **not** encrypt network traffic. Plain HTTP is therefore
+reasonable only on a trusted management/LAN network or for short-lived bootstrap
+access. Do not expose the default HTTP listener directly to the Internet or across
+an untrusted network. After setup, use a trusted TLS reverse proxy for shared or
+production-like operation. Set secure cookies when the browser-facing endpoint is
+HTTPS:
 
 ```dotenv
 DEEPSNOUT_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],deepsnout.example.org
 DEEPSNOUT_SECURE_COOKIES=1
 ```
 
-Keep localhost for the internal health check. List hostnames, not origins or ports;
-no wildcard. Preserve original Host at the proxy. Cookies are explicitly secure
-rather than trusting arbitrary forwarded headers. Example NGINX location:
+Preserve original Host at the proxy. Cookies are explicitly secure rather than
+trusting arbitrary forwarded headers. Example NGINX location:
 
 ```nginx
 location / {
