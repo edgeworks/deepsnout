@@ -32,12 +32,19 @@ rendered messages can be localized or transformed.
 
 A second flat Cribl shape is also supported where the original Windows `System`
 fields are promoted to the top level, for example `sourceMachineID`, `Name`,
-`Task`, `SystemTime`, `EventRecordID` and `Channel`, followed by the Sysmon event
-data such as `UtcTime`, `ProcessGuid`, `Image` and `DestinationIp`. Some pipelines
-of this form omit `EventID`. DeepSnout uses `Task` as the event type only when the
-provider or channel independently establishes that the record is a Sysmon event;
-it records a normalization warning when this fallback is used. `Task` is never
-accepted as a generic event ID for an unidentified/non-Sysmon provider.
+`Guid`, `Task`, `SystemTime`, `EventRecordID` and `Channel`, followed by the Sysmon
+event data such as `UtcTime`, `ProcessGuid`, `Image` and `DestinationIp`. Some
+pipelines of this form omit `EventID`. DeepSnout uses `Task` as the event type only
+when the provider name, Sysmon channel or exact Sysmon provider GUID independently
+establishes that the record is a Sysmon event; it records a normalization warning
+when this fallback is used. `Task` is never accepted as a generic event ID for an
+unidentified provider.
+
+If the selected Splunk sourcetype contains a mixed Windows Event Log stream,
+DeepSnout preserves the flat top-level `Name` as the provider. Non-Sysmon providers
+or an explicitly non-Sysmon channel are counted as ignored/unsupported rather than
+as malformed Sysmon. Records that cannot be identified either way still fail the
+slice instead of being silently discarded.
 
 Verify the actual sourcetype and payload in your deployment. Do not blindly apply
 the UF stanza to a WEF or Cribl path: subscription, collector identity and
@@ -56,8 +63,10 @@ Do not give this tool a Splunk administrator token.
 
 In Sources, set the management origin (for example
 `https://splunk.example:8089`), exact comma-separated index names, and the
-observed sourcetype. A wildcard is accepted; keep it restricted to Sysmon.
-Arbitrary operator SPL is intentionally not accepted.
+observed sourcetype. A wildcard is accepted; keep it restricted to Sysmon where
+possible. A broader mixed Windows sourcetype is supported only when the upstream
+JSON retains enough provider/channel identity for non-Sysmon records to be
+classified safely. Arbitrary operator SPL is intentionally not accepted.
 
 Choose the event payload format:
 
@@ -128,8 +137,8 @@ Create/status/delete: `/services/search/jobs`. Results:
 `/services/search/v2/jobs/{sid}/results`, pages of up to 500. The completed job
 must report resultCount. Recognized warnings/errors, preview pages, early
 finalization, missing results or malformed supported events fail the slice. No
-cursor advance occurs on failure. Unsupported event types are explicitly counted
-as ignored.
+cursor advance occurs on failure. Unsupported event types and recognized
+non-Sysmon providers are explicitly counted as ignored.
 
 Index-time scopes are half-open and explicitly checked using `_indextime`.
 Original UtcTime/SystemTime/TimeCreated drives comparison. Over-cap slices are
