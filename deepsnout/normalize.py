@@ -65,6 +65,17 @@ def scalar(value):
     return value
 
 
+def clean_text(value):
+    """Normalize scalar text and remove one Cribl-style wrapping quote pair."""
+    value = scalar(value)
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    return text
+
+
 def timestamp(value):
     try:
         if isinstance(value, (int, float)) or re.fullmatch(r"\d{10}(?:\.\d+)?", str(value)):
@@ -138,10 +149,10 @@ def xml_fields(raw):
 _CANONICAL = {
     "provider": "Provider", "providername": "ProviderName", "sourcename": "SourceName",
     "eventid": "EventID", "eventcode": "EventCode", "computer": "Computer",
-    "computername": "ComputerName", "machinename": "Computer", "eventrecordid": "EventRecordID",
-    "recordnumber": "RecordNumber", "channel": "Channel", "systemtime": "SystemTime",
-    "utctime": "UtcTime", "image": "Image", "parentimage": "ParentImage",
-    "commandline": "CommandLine", "processguid": "ProcessGuid",
+    "computername": "ComputerName", "machinename": "Computer", "sourcemachineid": "Computer",
+    "eventrecordid": "EventRecordID", "recordnumber": "RecordNumber", "channel": "Channel",
+    "systemtime": "SystemTime", "utctime": "UtcTime", "image": "Image",
+    "parentimage": "ParentImage", "commandline": "CommandLine", "processguid": "ProcessGuid",
     "parentprocessguid": "ParentProcessGuid", "sha256": "SHA256", "hashes": "Hashes",
     "destinationip": "DestinationIp", "destinationport": "DestinationPort",
     "sourceip": "SourceIp", "sourceport": "SourcePort", "protocol": "Protocol",
@@ -234,9 +245,19 @@ def object_fields(obj):
     # Cribl Windows Event Logs JSON / Get-WinEvent-style system fields. Event
     # payload values are recovered from __winEvent or Message below when present.
     for src, dest in (("Id", "EventID"), ("RecordId", "EventRecordID"),
-                      ("MachineName", "Computer"), ("TimeCreated", "SystemTime")):
+                      ("MachineName", "Computer"), ("sourceMachineID", "Computer"),
+                      ("TimeCreated", "SystemTime")):
         if src in event and not isinstance(event[src], (dict, list)):
             fields.setdefault(dest, event[src])
+    # Some Cribl Windows Event Log pipelines flatten the XML System block into
+    # top-level keys. In that shape Name is the provider name and EventID may be
+    # omitted even though the original Sysmon Task remains present.
+    provider_name = clean_text(event.get("Name", ""))
+    channel = clean_text(event.get("Channel", ""))
+    if provider_name.lower() in {"microsoft-windows-sysmon", "sysmon"}:
+        fields.setdefault("Provider", provider_name)
+    elif channel.lower() == "microsoft-windows-sysmon/operational":
+        fields.setdefault("Provider", "Microsoft-Windows-Sysmon")
     message = event.get("Message")
     if isinstance(message, str):
         for match in re.finditer(r"(?m)^\s*([A-Za-z][A-Za-z0-9_. ]{0,70})\s*:\s*(.*?)\s*$", message):
@@ -344,19 +365,30 @@ def normalize(record, event_format="auto"):
         for key in keys:
             v = low.get(key.lower())
             if v is not None and v != "":
-                return str(v).strip()
+                return clean_text(v)
         return default
     provider = get("Provider", "ProviderName", "SourceName")
     if provider and provider.lower() not in {"microsoft-windows-sysmon", "sysmon"}:
         raise UnsupportedEvent("Not a Sysmon provider")
+    eid_text = get("EventID", "EventCode", "Id", "event.code")
+    inferred_from_task = False
+    if not eid_text:
+        task = get("Task")
+        channel = get("Channel").lower()
+        if task and (provider.lower() in {"microsoft-windows-sysmon", "sysmon"}
+                     or channel == "microsoft-windows-sysmon/operational"):
+            eid_text = task
+            inferred_from_task = True
     try:
-        eid = int(get("EventID", "EventCode", "Id", "event.code"))
+        eid = int(eid_text)
     except ValueError:
-        raise InvalidEvent("Missing Sysmon EventID/EventCode") from None
+        raise InvalidEvent("Missing Sysmon EventID/EventCode and no trusted Sysmon Task fallback") from None
     if eid not in SUPPORTED:
         raise UnsupportedEvent("Sysmon event type not implemented")
-    host = get("Computer", "ComputerName", "MachineName").lower().rstrip(".")
+    host = get("Computer", "ComputerName", "MachineName", "sourceMachineID").lower().rstrip(".")
     warnings = []
+    if inferred_from_task:
+        warnings.append("EventID inferred from Sysmon Task because upstream JSON omitted EventID")
     if not host:
         host = str(envelope.get("host", "")).lower().rstrip(".")
         warnings.append("Endpoint identity fell back to collector host; verify the source")
