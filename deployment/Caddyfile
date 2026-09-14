@@ -1,0 +1,40 @@
+{
+    admin off
+    persist_config off
+    skip_install_trust
+
+    pki {
+        ca local {
+            name "DeepSnout Local CA"
+            root_cn "DeepSnout Local CA Root"
+            intermediate_cn "DeepSnout Local CA Intermediate"
+        }
+    }
+}
+
+http://{$DEEPSNOUT_PUBLIC_HOST:localhost} {
+    redir https://{$DEEPSNOUT_PUBLIC_HOST:localhost}{uri} permanent
+}
+
+https://{$DEEPSNOUT_PUBLIC_HOST:localhost} {
+    tls internal
+
+    @local_ca path /deepsnout-local-ca.crt
+    handle @local_ca {
+        rewrite * /root.crt
+        root * /data/caddy/pki/authorities/local
+        header {
+            Content-Type "application/x-x509-ca-cert"
+            Content-Disposition "attachment; filename=deepsnout-local-ca.crt"
+            Cache-Control "no-store"
+            X-Content-Type-Options "nosniff"
+        }
+        file_server
+    }
+
+    handle {
+        reverse_proxy web:8000 {
+            header_up Host {host}
+        }
+    }
+}

@@ -5,8 +5,8 @@ x-app: &app
   environment: &environment
     DEEPSNOUT_DATA_DIR: /var/lib/deepsnout
     DEEPSNOUT_POSTGRES_HOST: db
-    DEEPSNOUT_ALLOWED_HOSTS: ${DEEPSNOUT_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
-    DEEPSNOUT_SECURE_COOKIES: ${DEEPSNOUT_SECURE_COOKIES:-0}
+    DEEPSNOUT_ALLOWED_HOSTS: ${DEEPSNOUT_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1],${DEEPSNOUT_PUBLIC_HOST:-localhost}}
+    DEEPSNOUT_SECURE_COOKIES: ${DEEPSNOUT_SECURE_COOKIES:-1}
   volumes:
     - app-secrets:/var/lib/deepsnout:ro
   read_only: true
@@ -29,6 +29,7 @@ services:
       - db-secret:/export
     read_only: true
     restart: "no"
+
   db:
     build:
       context: .
@@ -50,6 +51,7 @@ services:
       timeout: 5s
       retries: 30
     restart: unless-stopped
+
   init:
     <<: *app
     command: [init]
@@ -57,10 +59,9 @@ services:
       db:
         condition: service_healthy
     restart: "no"
+
   web:
     <<: *app
-    ports:
-      - "${DEEPSNOUT_BIND_ADDRESS:-0.0.0.0}:${DEEPSNOUT_PORT:-8080}:8000"
     depends_on:
       init:
         condition: service_completed_successfully
@@ -71,6 +72,7 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+
   worker:
     <<: *app
     command: [worker]
@@ -84,7 +86,32 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+
+  caddy:
+    build:
+      context: .
+      dockerfile: deployment/caddy.Dockerfile
+    image: deepsnout-caddy:local
+    environment:
+      DEEPSNOUT_PUBLIC_HOST: ${DEEPSNOUT_PUBLIC_HOST:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
 volumes:
   app-secrets:
   db-secret:
   database:
+  caddy-data:
+  caddy-config:

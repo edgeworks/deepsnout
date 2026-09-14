@@ -10,5 +10,6 @@ htmlcov
 *.db
 *.pem
 *.key
+*.crt
 tests
 docs

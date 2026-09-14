@@ -1,71 +1,104 @@
 # Deployment and operator boundary
 
 `docker compose up --build -d` provisions random application/DB secrets, PostgreSQL,
-schema v1, web and one analysis worker. Retrieve first-run protection with
-`docker compose exec web deepsnout setup-token`, then create the administrator in
-the GUI. Setup refuses to run again after an account exists.
+schema v1, the Python web/worker services and a bundled Caddy edge. Retrieve first-run
+protection with `docker compose exec web deepsnout setup-token`, then create the
+administrator in the GUI. Setup refuses to run again after an account exists.
 
 Normal configuration, users, collection, retention jobs, expectations, demo removal
-and investigation are GUI operations. Host installation, TLS, infrastructure backup
-and disaster recovery remain host-administrator tasks. No container shell/control
-is exposed by the web interface.
+and investigation are GUI operations. Host installation, network firewalling,
+infrastructure backup and disaster recovery remain host-administrator tasks. No
+container shell/control is exposed by the web interface.
 
 One worker only. Its PostgreSQL advisory lock excludes replicas. One web process
 is also recommended; login throttling is process-local. Web/worker run as UID10001
 with read-only root filesystems and dropped capabilities. Secret initialization
-uses root only to create/chown files. PostgreSQL uses its standard container startup in a thin derived image. Bootstrap
-scripts are copied into that image with explicit read permissions; they are not
-bind-mounted from the host checkout. A separate bootstrap admin secret
-is mounted only in the DB service; the application role is not a PostgreSQL
-superuser and cannot create other databases or roles.
+uses root only to create/chown files. PostgreSQL uses its standard container startup
+in a thin derived image. Bootstrap scripts are copied into that image with explicit
+read permissions; they are not bind-mounted from the host checkout. A separate
+bootstrap admin secret is mounted only in the DB service; the application role is
+not a PostgreSQL superuser and cannot create other databases or roles.
 
-## Network access
+## Browser-facing HTTPS
 
-The Compose deployment publishes the web port on all host interfaces by default so
-headless servers can be initialized from an administrator workstation. DeepSnout
-still validates the HTTP Host header, so add the IP address and/or DNS name that
-operators will actually use. Copy `.env.example` to `.env`, replace the example
-address/name, and keep localhost for the internal health check:
+The Compose deployment no longer publishes FastAPI directly. Caddy is the only
+browser-facing service:
 
-```dotenv
-DEEPSNOUT_BIND_ADDRESS=0.0.0.0
-DEEPSNOUT_PORT=8080
-DEEPSNOUT_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],10.20.30.40,deepsnout.example.org
-DEEPSNOUT_SECURE_COOKIES=0
+```text
+browser -> TCP 80 (redirect only) / TCP+UDP 443 -> Caddy -> web:8000
+                                                -> private Docker network
 ```
 
-For loopback-only behavior set `DEEPSNOUT_BIND_ADDRESS=127.0.0.1`. The bind
-address controls Docker's host listener; `DEEPSNOUT_ALLOWED_HOSTS` controls which
-Host headers the application accepts. List hostnames/IPs, not origins or ports;
-no wildcard is accepted.
+PostgreSQL is not published. The application service has no host port in the
+standard Compose file.
 
-The first-run setup token prevents an unauthenticated visitor from claiming the
-instance, but it does **not** encrypt network traffic. Plain HTTP is therefore
-reasonable only on a trusted management/LAN network or for short-lived bootstrap
-access. Do not expose the default HTTP listener directly to the Internet or across
-an untrusted network. After setup, use a trusted TLS reverse proxy for shared or
-production-like operation. Set secure cookies when the browser-facing endpoint is
-HTTPS:
+Copy `.env.example` to `.env` and set the ONE DNS name or IP address that operators
+will use in the browser:
 
 ```dotenv
-DEEPSNOUT_ALLOWED_HOSTS=localhost,127.0.0.1,[::1],deepsnout.example.org
+DEEPSNOUT_PUBLIC_HOST=deepsnout.example.internal
+DEEPSNOUT_ALLOWED_HOSTS=localhost,127.0.0.1,[::1]
 DEEPSNOUT_SECURE_COOKIES=1
 ```
 
-Preserve original Host at the proxy. Cookies are explicitly secure rather than
-trusting arbitrary forwarded headers. Example NGINX location:
+An IPv4 address is also valid; bracket an IPv6 literal. Do not put a URL, port,
+space or comma in `DEEPSNOUT_PUBLIC_HOST`. The Caddy startup wrapper rejects values
+that could become Caddyfile syntax.
 
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    client_max_body_size 10m;
-}
+Compose automatically adds `DEEPSNOUT_PUBLIC_HOST` to the application's Host
+allowlist. `DEEPSNOUT_ALLOWED_HOSTS` is only for extra HTTP Host aliases. The current
+Caddy configuration issues a certificate for one primary name/address, so extra
+aliases do not automatically become valid TLS names.
+
+Port 80 performs a permanent redirect to the corresponding HTTPS URL. Setup, login
+and authenticated pages are therefore served through HTTPS in the Compose path.
+`DEEPSNOUT_SECURE_COOKIES=1` is the deployment default.
+
+### Bootstrap certificate
+
+The first Caddy startup creates a persistent **DeepSnout Local CA** in the
+`caddy-data` Docker volume and automatically issues/renews the leaf certificate for
+`DEEPSNOUT_PUBLIC_HOST`. Caddy is explicitly told not to modify the container's own
+trust stores. Trust on administrator workstations is an operator decision.
+
+A browser will normally warn about the local CA until its public root is trusted.
+For a short isolated pilot you can proceed through that warning according to local
+policy. For deliberate trust distribution, export the public root only:
+
+```sh
+docker compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > deepsnout-local-ca.crt
+docker compose exec -T caddy sha256sum /data/caddy/pki/authorities/local/root.crt
 ```
 
-This is NOT a full TLS server configuration. Supply the organization's certificate
-and restrict access to the intended analyst/admin network. No SSO/MFA exists yet.
-A login page alone is not a reason to expose this pilot publicly.
+Verify the fingerprint over a trusted channel before importing the CA on another
+machine. The same public certificate is available over the already-TLS-protected
+endpoint at `/deepsnout-local-ca.crt`, mainly as a convenience after the server
+identity has been verified.
+
+**Never export or distribute the Caddy local CA private key.** Any machine that
+possesses it can mint certificates trusted by clients that trust this root.
+
+The CA identity lives in `caddy-data`. Removing that volume creates a new CA on the
+next start, invalidating trust you established in the old one. This is one reason
+`docker compose down -v` is destructive, not a normal reset procedure.
+
+### Organization certificates and ACME
+
+The architecture deliberately keeps TLS ownership in Caddy rather than Uvicorn.
+The current alpha does **not yet** provide GUI upload/activation of an organization
+certificate or automatic public/internal ACME enrollment. Those are planned as
+Caddy-management features; FastAPI will not be given normal read access to the
+active TLS private key.
+
+Until that management path is implemented, the supported bundled mode is the local
+CA described above. Do not bake organization private keys into the application
+Docker image. If a production environment requires its own TLS identity before the
+integrated certificate manager exists, keep the deployment in a controlled pilot
+scope or use an infrastructure-approved external TLS terminator rather than
+modifying application code to disable TLS validation.
+
+No SSO/MFA exists yet. HTTPS protects transport; it does not make an Internet-facing
+pilot appropriate. Restrict ports 80/443 to the intended analyst/admin network.
 
 ## Health and retention
 
@@ -75,20 +108,29 @@ coverage is visible on findings. No input is not a clean endpoint verdict.
 Tune explicit limits in Analysis policy; a failed slice does not advance a cursor.
 A full queue/fingerprint cap requires investigation, not silent data dropping.
 
+The web container still has an internal HTTP health check because that traffic
+never leaves the Docker network. External Compose smoke tests verify the Caddy TLS
+chain using the exported local root.
+
 ## Backups and recovery
 
-Back up PostgreSQL, app-secrets and db-secret volumes TOGETHER. Both contain sensitive
-material: DB metadata/password hashes/encrypted tokens and their encryption key.
+Back up PostgreSQL, `app-secrets`, `db-secret` and `caddy-data` TOGETHER. The first
+three contain sensitive application/DB state; `caddy-data` contains the DeepSnout
+Local CA private key and certificate state. Losing only `caddy-data` does not erase
+DeepSnout findings, but it changes the TLS trust identity and may break trusted
+clients.
+
 A logical database backup:
 
 ```sh
 docker compose exec -T db pg_dump -U deepsnout -d deepsnout -Fc > deepsnout.dump
 ```
 
-This alone is not a full backup. Preserve both secret volumes through infrastructure backup,
-preferably with sources paused for a coherent snapshot. Encrypt backups and test
-isolated restore. Unknown schema versions require an explicit migration, not a
-blind init. GUI disaster-recovery restore is not implemented.
+This alone is not a full backup. Preserve secret and Caddy volumes through
+infrastructure backup, preferably with sources paused for a coherent snapshot.
+Encrypt backups and test isolated restore. Unknown schema versions require an
+explicit migration, not a blind init. GUI disaster-recovery restore is not
+implemented.
 
 Emergency host-admin account recovery:
 
@@ -99,15 +141,24 @@ docker compose exec web deepsnout reset-password --username admin
 The interactive prompt avoids secrets in arguments. That account's sessions are
 revoked and the action is audited. Normal changes are in Accounts.
 
-## Offline and updates
+## Offline, proxies and updates
 
 Image builds need registry/package access. Prebuild and export/import the images
-for disconnected deployment. No automatic reputation calls, downloads or model
-fetches run in local analysis. The libpsl snapshot ages with the image. Rebuild and
-scan dependencies under normal change control; back up before updating.
-Direct dependencies are pinned, but transitive dependencies/base images are not a
-complete cryptographic lockfile. A future release should provide pinned digests
-and reproducible offline bundles after the initial container CI is validated.
+for disconnected deployment. The bundled local-CA Caddy runtime does not need
+Internet access. No automatic reputation calls, downloads or model fetches run in
+local analysis. The operator-configured Splunk connection is the intentional
+collection dependency.
+
+If the host requires an outbound proxy, Docker registry access and Dockerfile
+`RUN` downloads are separate layers. Configure the daemon/builder as required or
+preserve `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` through `sudo` and pass the standard
+proxy build arguments. Do not put proxy credentials in the Dockerfiles.
+
+The libpsl snapshot ages with the application image. Rebuild and scan dependencies
+under normal change control; back up before updating. Direct Python dependencies
+and the Caddy image tag are pinned, but transitive dependencies/base-image digests
+are not a complete cryptographic lockfile. A future release should provide pinned
+digests and reproducible offline bundles after the pilot is validated.
 
 ## Interrupted PostgreSQL bootstrap: script permission denied
 

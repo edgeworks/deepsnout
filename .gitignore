@@ -13,5 +13,6 @@ htmlcov/
 *.db-wal
 *.pem
 *.key
+*.crt
 dist/
 build/

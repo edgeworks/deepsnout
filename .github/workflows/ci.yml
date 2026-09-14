@@ -31,6 +31,7 @@ jobs:
         run: echo 'DEEPSNOUT_TEST_DATABASE_URL=postgresql+psycopg://deepsnout:isolated-ci-test-password@localhost:5432/deepsnout_test' >> "$GITHUB_ENV"
       - run: python -m pytest --cov=deepsnout --cov-report=term-missing -W error::sqlalchemy.exc.SAWarning
       - run: pip freeze
+
   container:
     runs-on: ubuntu-latest
     steps:
@@ -39,16 +40,30 @@ jobs:
         run: chmod 600 deployment/postgres-init.sh deployment/postgres-healthcheck.sh
       - run: docker compose config --quiet
       - run: docker compose up --build -d
-      - name: Smoke-test startup
+      - name: Smoke-test HTTPS edge and application startup
         run: |
           for i in $(seq 1 90); do
-            if curl -fsS http://localhost:8080/healthz; then break; fi
+            if curl --insecure --fail --silent https://localhost/healthz >/dev/null 2>&1; then
+              break
+            fi
             sleep 2
           done
-          curl -fsS http://localhost:8080/healthz
-          curl -fsS http://localhost:8080/setup | grep -q 'setup_token'
+          docker compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > /tmp/deepsnout-local-ca.crt
+          curl --fail --silent --show-error --cacert /tmp/deepsnout-local-ca.crt https://localhost/healthz
+          curl --fail --silent --show-error --cacert /tmp/deepsnout-local-ca.crt https://localhost/setup | grep -q 'setup_token'
+          curl --fail --silent --show-error --cacert /tmp/deepsnout-local-ca.crt https://localhost/deepsnout-local-ca.crt | cmp - /tmp/deepsnout-local-ca.crt
+          curl --silent --show-error --head http://localhost/healthz | grep -qi '^location: https://localhost/healthz'
           docker compose exec -T web deepsnout version
-          docker compose exec -T web deepsnout setup-token | python tools/compose_smoke.py
+          docker compose exec -T web deepsnout setup-token | \
+            DEEPSNOUT_SMOKE_URL=https://localhost \
+            DEEPSNOUT_SMOKE_CA=/tmp/deepsnout-local-ca.crt \
+            python tools/compose_smoke.py
+      - name: Reject Caddyfile-injection-shaped public host
+        run: |
+          if docker run --rm -e 'DEEPSNOUT_PUBLIC_HOST=bad host { }' deepsnout-caddy:local; then
+            echo 'Caddy edge accepted an unsafe public host value.' >&2
+            exit 1
+          fi
       - name: Interrupted database bootstrap recovery
         run: sh tools/postgres_bootstrap_smoke.sh
       - name: Logs

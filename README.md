@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a1, initial runnable pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a2, initial runnable pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -27,6 +27,8 @@ limited source and known examples. See [the exact verification boundary](docs/te
   local administrator/analyst/viewer accounts.
 - Synthetic demo through the **same parser and analysis engine**, clearly marked
   and removable from the GUI. It is not a canned list of findings.
+- Bundled Caddy edge service: HTTPS from first boot, HTTP-to-HTTPS redirect and a
+  persistent DeepSnout Local CA. FastAPI and PostgreSQL are not directly published.
 
 No VirusTotal, external reputation feeds, LLM, tracking, font CDN, model downloads
 or cloud inference is required or implemented. No endpoint agent is shipped.
@@ -34,53 +36,77 @@ WEF/Elastic transports and experimental local ML remain future work.
 
 ## Quick start: Linux containers
 
-Install Docker Engine/Desktop with the **Compose v2 plugin**. Clone the repository and enter the directory containing `compose.yaml`:
+Install Docker Engine/Desktop with the **Compose v2 plugin**. Clone the repository:
 
 ```sh
 git clone https://github.com/edgeworks/deepsnout.git
 cd deepsnout
 ```
 
-For a headless server, create `.env` and add the IP address or DNS name you will use
-in the browser. The Docker port is published on all host interfaces by default,
-but DeepSnout still rejects unknown Host headers:
+For a headless server, create `.env` and set the one browser-facing DNS name or IP:
 
 ```sh
 cp .env.example .env
-# Edit DEEPSNOUT_ALLOWED_HOSTS and replace the example IP/name with this server.
+# Edit DEEPSNOUT_PUBLIC_HOST, for example:
+# DEEPSNOUT_PUBLIC_HOST=deepsnout.example.internal
+# or DEEPSNOUT_PUBLIC_HOST=10.20.30.40
 ```
 
-If you want loopback-only behavior instead, set `DEEPSNOUT_BIND_ADDRESS=127.0.0.1`.
+`DEEPSNOUT_PUBLIC_HOST` becomes both the Caddy certificate identity and an allowed
+HTTP Host. The initial configuration deliberately supports one primary name/address;
+additional application Host aliases do not automatically receive certificates.
 
-Then start the stack:
+Start the stack and retrieve the first-run token:
 
 ```sh
 docker compose up --build -d
 docker compose exec web deepsnout setup-token
 ```
 
-Open **http://SERVER:8080**, paste the one-time token and create your first
-administrator. There is no shared/default password. Plain HTTP is intended only
-for a trusted management network or initial setup; use HTTPS before exposing the
-application across an untrusted network. Try **Import & demo -> Load synthetic
-demo**, inspect its job report, then open the investigation inbox.
+Open **https://DEEPSNOUT_PUBLIC_HOST/**. Port 80 only redirects to HTTPS. On first
+boot Caddy uses the persistent **DeepSnout Local CA**, so an administrator workstation
+will normally show an untrusted-certificate warning until that CA is trusted or the
+deployment is moved to an organization certificate.
+
+To export only the public root certificate after Caddy has started:
+
+```sh
+docker compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > deepsnout-local-ca.crt
+docker compose exec -T caddy sha256sum /data/caddy/pki/authorities/local/root.crt
+```
+
+Transfer/trust the public certificate according to your workstation/organization
+policy and verify its fingerprint over a trusted channel. **Never copy the CA private
+key from the Caddy data volume.** It can issue certificates trusted by any workstation
+that trusts this root.
+
+Paste the one-time setup token and create the first administrator. There is no
+shared/default password. Try **Import & demo -> Load synthetic demo**, inspect its
+job report, then open the investigation inbox.
 
 Next configure a limited real connection under **Sources**, test, poll once, and
 inspect the result before enabling scheduling. [Splunk guide](docs/splunk.md).
 
-Compose provides PostgreSQL, two Python services (web and analysis worker), and
-two one-shot initialization jobs. Secrets and DB state persist in named volumes;
-`docker compose down` retains them. **`docker compose down -v` destroys them.**
-The initial image build downloads packages/images; local analysis does not require
-external connectivity after deployment. The operator-configured Splunk connection
-is the intentional network dependency for collection.
+Compose provides Caddy, PostgreSQL, two Python services (web and analysis worker),
+and two one-shot initialization jobs. Only Caddy publishes host ports (80/443;
+443/UDP enables HTTP/3). Secrets, DB state and Caddy PKI state persist in named
+volumes; `docker compose down` retains them. **`docker compose down -v` destroys
+them.** The initial image build downloads packages/images; local analysis does not
+require external connectivity after deployment. The operator-configured Splunk
+connection is the intentional network dependency for collection.
+
+If your network requires an outbound proxy while building images, configure the
+Docker daemon/builder or preserve the proxy environment and pass standard proxy
+build arguments. Do not bake proxy credentials into the Dockerfiles.
 
 ## Why this architecture?
 
 Python/FastAPI and Jinja keep the code approachable without a frontend build
 system. PostgreSQL provides transactions, durable jobs and checkpoints without
-adding Redis/Celery/Kafka. One analysis writer makes ordering explicit. SQLite
-supports local development/tests; **PostgreSQL is the deployment target**.
+adding Redis/Celery/Kafka. Caddy owns the browser-facing TLS protocol and local PKI
+instead of teaching the application server to manage certificates. One analysis
+writer makes ordering explicit. SQLite supports local development/tests;
+**PostgreSQL is the deployment target**.
 
 Full commands are inspected transiently and replaced by flags; original source
 references remain available. There is no permanent raw-event archive. Read
@@ -100,25 +126,24 @@ vanish because activity becomes common. [Precise detector semantics](docs/detect
 
 ## Development
 
-Python 3.12+ on Linux/macOS; the container uses Python 3.13:
+Python 3.12+ on Linux/macOS; the application container uses Python 3.13:
 
 ```sh
 python -m venv .venv
 . .venv/bin/activate
 pip install -e '.[test]'
 python -m pytest
-# Terminal 1: local SQLite development
+# Terminal 1: local SQLite HTTP development only
 python -m deepsnout.cli serve
 # Terminal 2
 python -m deepsnout.cli worker
-# Setup token for http://localhost:8000
 python -m deepsnout.cli setup-token
 ```
 
-CI configuration exercises SQLite, a disposable PostgreSQL DB and the Compose
-stack. Check the Actions tab for the result of the current commit. Mock Splunk tests
-are not certification against your deployment. The testing report distinguishes
-locally tested libraries from newer container pins.
+The direct development server is intentionally separate from the Compose deployment;
+Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
+the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
+not certification against your deployment.
 
 ## Deliberate boundaries
 
@@ -127,6 +152,11 @@ IOC inventory, alert email engine, trained ML model, automatic offline update
 bundle or GUI disaster-recovery restore. Observed history is not necessarily
 benign. Missing joins, limited history, retention, cardinality and source lag
 remain important limitations. No 3,000-endpoint throughput claim is made.
+
+The bundled Caddy mode currently uses DeepSnout's local CA. GUI upload/activation of
+an organization certificate and automated public/internal ACME are **not implemented
+yet**; those will be added without making the FastAPI service own the TLS private
+key. See [deployment](docs/deployment.md).
 
 Future enrichment stays optional and entitlement-aware. A possible VirusTotal
 adapter uses **one configured account**, deduplication, cache, explicit budgets,

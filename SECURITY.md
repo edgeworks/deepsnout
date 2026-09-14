@@ -10,15 +10,25 @@ server sessions, admin/analyst/viewer roles, signed double-submit CSRF, explicit
 host allowlist, escaped templates, self-only CSP, request/queue caps, safe XML,
 no executed telemetry, encrypted source credentials, verified outbound TLS/no
 credential-following redirects, transactional cursors, isolated demo namespace,
-audit and limited container privileges.
+audit and limited application-container privileges.
+
+The standard Compose deployment exposes only bundled Caddy on ports 80/443.
+Port 80 redirects to HTTPS; FastAPI and PostgreSQL are not directly published.
+Caddy uses a persistent DeepSnout Local CA for bootstrap TLS. The CA private key
+in `caddy-data` is highly sensitive: anyone who obtains it can mint certificates
+trusted by clients that trust that root. Back it up securely and never distribute it.
 
 Private source origins/custom CA are privileged administrator choices. Network
 restrictions are still required; no claim of protection against all malicious-admin
 SSRF/DNS-rebinding scenarios is made. Do not mount the Docker socket or add a shell.
 
-HTTP is loopback evaluation only. Shared operation needs HTTPS, secure cookies,
-explicit allowed hosts and access controls. Throttling is single-process. No SSO,
-MFA, multi-tenant isolation or assurance of production hardening exists yet.
+HTTPS protects transport but does not make the pilot safe for unrestricted Internet
+exposure. Restrict the listener to intended analyst/admin networks. The bootstrap
+CA is untrusted until deliberately installed; verify its public-root fingerprint
+through a trusted channel before adding it to client trust stores. GUI organization-
+certificate management and ACME are not yet implemented. Throttling is single-process.
+No SSO, MFA, multi-tenant isolation or assurance of production hardening exists yet.
+
 Source references, paths, DNS samples and backups may remain sensitive even though
 raw commands are discarded. Do not import arbitrary serialized ML objects; there
 is no model-import path in this release.
