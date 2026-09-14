@@ -36,6 +36,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify source manifest
+        run: |
+          git ls-files -z | grep -zv '^MANIFEST.sha256$' | sort -z | xargs -0 sha256sum > /tmp/manifest
+          diff -u MANIFEST.sha256 /tmp/manifest
       - name: Reproduce restrictive host checkout permissions
         run: chmod 600 deployment/postgres-init.sh deployment/postgres-healthcheck.sh
       - run: docker compose config --quiet
