@@ -41,6 +41,17 @@ git clone https://github.com/edgeworks/deepsnout.git
 cd deepsnout
 ```
 
+For a headless server, create `.env` and add the IP address or DNS name you will use
+in the browser. The Docker port is published on all host interfaces by default,
+but DeepSnout still rejects unknown Host headers:
+
+```sh
+cp .env.example .env
+# Edit DEEPSNOUT_ALLOWED_HOSTS and replace the example IP/name with this server.
+```
+
+If you want loopback-only behavior instead, set `DEEPSNOUT_BIND_ADDRESS=127.0.0.1`.
+
 Then start the stack:
 
 ```sh
@@ -48,17 +59,14 @@ docker compose up --build -d
 docker compose exec web deepsnout setup-token
 ```
 
-Open **http://localhost:8080**, paste the one-time token and create your first
-administrator. There is no shared/default password. Try **Import & demo -> Load
-synthetic demo**, inspect its job report, then open the investigation inbox.
+Open **http://SERVER:8080**, paste the one-time token and create your first
+administrator. There is no shared/default password. Plain HTTP is intended only
+for a trusted management network or initial setup; use HTTPS before exposing the
+application across an untrusted network. Try **Import & demo -> Load synthetic
+demo**, inspect its job report, then open the investigation inbox.
 
 Next configure a limited real connection under **Sources**, test, poll once, and
 inspect the result before enabling scheduling. [Splunk guide](docs/splunk.md).
-
-Default HTTP binds **only to loopback**. For a remote host, use an SSH tunnel
-(`ssh -L 8080:127.0.0.1:8080 host`) or a trusted HTTPS reverse proxy. Read
-[deployment](docs/deployment.md) before exposing it to other users. Do not publish
-the unencrypted default port on an untrusted network.
 
 Compose provides PostgreSQL, two Python services (web and analysis worker), and
 two one-shot initialization jobs. Secrets and DB state persist in named volumes;
