@@ -30,10 +30,19 @@ Sysmon `Message` is present, named `Key: value` lines are used as a fallback.
 That fallback is not a substitute for preserving structured event data because
 rendered messages can be localized or transformed.
 
+A second flat Cribl shape is also supported where the original Windows `System`
+fields are promoted to the top level, for example `sourceMachineID`, `Name`,
+`Task`, `SystemTime`, `EventRecordID` and `Channel`, followed by the Sysmon event
+data such as `UtcTime`, `ProcessGuid`, `Image` and `DestinationIp`. Some pipelines
+of this form omit `EventID`. DeepSnout uses `Task` as the event type only when the
+provider or channel independently establishes that the record is a Sysmon event;
+it records a normalization warning when this fallback is used. `Task` is never
+accepted as a generic event ID for an unidentified/non-Sysmon provider.
+
 Verify the actual sourcetype and payload in your deployment. Do not blindly apply
 the UF stanza to a WEF or Cribl path: subscription, collector identity and
-transformations differ. Preserve original Computer/MachineName, provider,
-event ID/time, Image and ProcessGuid. Event 3 needs DestinationIp,
+transformations differ. Preserve original Computer/MachineName/sourceMachineID,
+provider, event ID/time, Image and ProcessGuid. Event 3 needs DestinationIp,
 DestinationPort and Initiated. Event 22 needs QueryName. Sysmon rules must
 actually collect the events; a forwarder alone does not create them. No
 additional endpoint software is introduced by DeepSnout.
@@ -143,11 +152,11 @@ restrict egress.
 ## Pilot validation
 
 Use the deployed Splunk version and sanitized real events. Check count parity,
-original Computer/MachineName, time, GUID, invalid token/CA/pin handling,
-pause/resume, restart while polling, duplicates and multi-page slices. For a
-Cribl path, inspect at least one real Event 1, 3 and 22 payload before expanding
-scope; arbitrary organization-specific Cribl renames cannot be inferred by the
-normalizer.
+original Computer/MachineName/sourceMachineID, time, GUID, invalid token/CA/pin
+handling, pause/resume, restart while polling, duplicates and multi-page slices.
+For a Cribl path, inspect at least one real Event 1, 3 and 22 payload before
+expanding scope; arbitrary organization-specific Cribl renames cannot be inferred
+by the normalizer.
 
 This release has contract/mock tests and local TLS pin tests during development,
 not a live Splunk compatibility certification.
