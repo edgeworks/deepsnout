@@ -12,15 +12,27 @@ no executed telemetry, encrypted source credentials, verified outbound TLS/no
 credential-following redirects, transactional cursors, isolated demo namespace,
 audit and limited application-container privileges.
 
+Splunk sources use CA and hostname verification by default. A source administrator
+can explicitly select a legacy **pinned leaf certificate** mode for an HTTPS
+management endpoint whose certificate has no usable hostname identity. This is
+not a global TLS-ignore switch: the source requires an exact SHA-256 fingerprint,
+an unauthenticated preflight verifies that leaf before DeepSnout adds the Splunk
+Authorization header, and authenticated responses are checked against the same
+pin. Certificate replacement intentionally fails closed until an administrator
+verifies and updates the pin. Keep internal Splunk management traffic direct
+rather than making a TLS-intercepting proxy part of the trusted path where
+possible.
+
 The standard Compose deployment exposes only bundled Caddy on ports 80/443.
 Port 80 redirects to HTTPS; FastAPI and PostgreSQL are not directly published.
 Caddy uses a persistent DeepSnout Local CA for bootstrap TLS. The CA private key
 in `caddy-data` is highly sensitive: anyone who obtains it can mint certificates
 trusted by clients that trust that root. Back it up securely and never distribute it.
 
-Private source origins/custom CA are privileged administrator choices. Network
-restrictions are still required; no claim of protection against all malicious-admin
-SSRF/DNS-rebinding scenarios is made. Do not mount the Docker socket or add a shell.
+Private source origins/custom CA/certificate pins are privileged administrator
+choices. Network restrictions are still required; no claim of protection against
+all malicious-admin SSRF/DNS-rebinding scenarios is made. Do not mount the Docker
+socket or add a shell.
 
 HTTPS protects transport but does not make the pilot safe for unrestricted Internet
 exposure. Restrict the listener to intended analyst/admin networks. The bootstrap
