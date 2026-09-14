@@ -156,6 +156,34 @@ def test_cribl_win_event_fallback():
     assert e.host=="ws4" and e.query=="example.org"
 
 
+def test_cribl_flat_top_level_task_fallback_from_real_shape():
+    raw={"sourceMachineID":"Computer1.domain.local","Name":"'Microsoft-Windows-Sysmon'",
+        "Guid":"'{5770385f-c22a-43e0-bf4c-06f5698ffbd9}'","Version":"5","Level":"4","Task":"1",
+        "Opcode":"0","Keywords":"0x8000000000000000","SystemTime":"'2026-09-14T11:57:36.2358960Z'",
+        "EventRecordID":"342444","ProcessID":"'20384'","ThreadID":"'19008'",
+        "Channel":"Microsoft-Windows-Sysmon/Operational","UserID":"S-1-5-18","RuleName":"-",
+        "UtcTime":"2026-09-14 11:57:36.233","ProcessGuid":"{895d25f3-e130-6aa7-c73d-000000001800}",
+        "ProcessId":"14588","Image":r"C:\Windows\System32\smartscreen.exe",
+        "CommandLine":r"C:\Windows\System32\smartscreen.exe -Embedding",
+        "Hashes":"MD5=8C82BDA3ED4D8963EF65D91A0CECCBC1,SHA256=2AF496C24C1DEF94006DA19E6E5940715067BA8AFD482FE4C7C944E882EC43A3",
+        "ParentProcessGuid":"{895d25f3-b8c3-6a97-0f00-000000001800}","ParentProcessId":"1360",
+        "ParentImage":r"C:\Windows\System32\svchost.exe"}
+    e=normalize({"_raw":json.dumps(raw),"host":"collector"},"json")
+    assert e.event_id==1 and e.host=="computer1.domain.local" and e.app=="smartscreen.exe"
+    assert e.sha256=="2af496c24c1def94006da19e6e5940715067ba8afd482fe4c7c944e882ec43a3"
+    assert any("inferred from Sysmon Task" in warning for warning in e.warnings)
+
+
+@pytest.mark.parametrize("task,fields",[(3,{"DestinationIp":"8.8.8.8","DestinationPort":"443","Initiated":"true"}),
+                                         (22,{"QueryName":"Example.org"})])
+def test_cribl_task_fallback_for_supported_sysmon_types(task,fields):
+    raw={"sourceMachineID":"ws.example","Name":"'Microsoft-Windows-Sysmon'","Task":str(task),
+         "Channel":"Microsoft-Windows-Sysmon/Operational","UtcTime":"2026-09-14 11:57:36.233",
+         "ProcessGuid":"{00000000-0000-0000-0000-000000000001}","Image":r"C:\Windows\x.exe",**fields}
+    e=normalize({"_raw":json.dumps(raw)},"json")
+    assert e.event_id==task and e.host=="ws.example"
+
+
 def test_explicit_event_format_rejects_switch():
     with pytest.raises(InvalidEvent,match="Configured JSON"):
         normalize({"_raw":XML},"json")
