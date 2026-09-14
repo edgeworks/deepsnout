@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a4, initial runnable pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a5, initial runnable pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -14,7 +14,10 @@ limited source and known examples. See [the exact verification boundary](docs/te
 
 - Standard Sysmon 1, 3 and 22 in XML, flat/nested JSON (including common Cribl
   Windows-event transformations and flat `sourceMachineID`/`Name`/`Task` records),
-  Splunk result wrappers, NDJSON, and English rendered event text. No binary EVTX reader.
+  Splunk result wrappers, NDJSON, and English rendered event text. Mixed flat
+  Windows-event streams identify and ignore non-Sysmon providers instead of
+  treating them as malformed Sysmon; the Sysmon provider GUID is also a trusted
+  Task-fallback marker. No binary EVTX reader.
 - GUI-configured **Splunk search-API pull** with encrypted credentials, strict
   CA/hostname TLS by default, an explicit per-source leaf-certificate pin mode
   for legacy management certificates, index-time checkpoints, pagination,
