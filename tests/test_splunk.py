@@ -1,8 +1,16 @@
 import hashlib
+import http.server
 import json
+import ssl
+import threading
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from conftest import raw_event
 from deepsnout.splunk import SplunkClient,SplunkSettings,SplunkError,TooManyEvents,validate_url,peer_sha256
 
@@ -140,3 +148,56 @@ def test_query_honors_explicit_json_format():
     events,report=client.query(100,200)
     assert len(events)==1 and report['invalid']==0
     client.close()
+
+
+def test_pinned_tls_wrong_hostname_and_fail_closed(tmp_path):
+    now=datetime.now(timezone.utc)
+    root_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+    root_name=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'Test Root')])
+    root=(x509.CertificateBuilder().subject_name(root_name).issuer_name(root_name)
+        .public_key(root_key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now-timedelta(minutes=1)).not_valid_after(now+timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True,path_length=None),critical=True)
+        .add_extension(x509.KeyUsage(digital_signature=False,content_commitment=False,key_encipherment=False,
+            data_encipherment=False,key_agreement=False,key_cert_sign=True,crl_sign=True,
+            encipher_only=None,decipher_only=None),critical=True)
+        .sign(root_key,hashes.SHA256()))
+    leaf_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+    leaf_name=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'intentionally-wrong-host')])
+    leaf=(x509.CertificateBuilder().subject_name(leaf_name).issuer_name(root_name)
+        .public_key(leaf_key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now-timedelta(minutes=1)).not_valid_after(now+timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=False,path_length=None),critical=True)
+        .add_extension(x509.KeyUsage(digital_signature=True,content_commitment=False,key_encipherment=True,
+            data_encipherment=False,key_agreement=False,key_cert_sign=False,crl_sign=False,
+            encipher_only=None,decipher_only=None),critical=True)
+        .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]),critical=False)
+        .sign(root_key,hashes.SHA256()))
+    chain=tmp_path/'chain.pem'; keyfile=tmp_path/'leaf.key'
+    chain.write_bytes(leaf.public_bytes(serialization.Encoding.PEM)+root.public_bytes(serialization.Encoding.PEM))
+    keyfile.write_bytes(leaf_key.private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,serialization.NoEncryption()))
+    auth_seen=[]
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            auth=self.headers.get('Authorization'); auth_seen.append(auth)
+            body=(json.dumps({'entry':[{'content':{'version':'test'}}]}).encode() if auth else b'{}')
+            self.send_response(200 if auth else 401); self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+        def log_message(self,*args): pass
+    server=http.server.HTTPServer(('127.0.0.1',0),Handler)
+    context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(chain,keyfile)
+    server.socket=context.wrap_socket(server.socket,server_side=True)
+    thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+    fingerprint=hashlib.sha256(leaf.public_bytes(serialization.Encoding.DER)).hexdigest()
+    url=f'https://127.0.0.1:{server.server_address[1]}'
+    try:
+        client=SplunkClient(SplunkSettings(url=url,indexes='wef',tls_mode='pinned',cert_sha256=fingerprint),'token')
+        assert client.test()['tls']=='leaf certificate pinned'; client.close()
+        assert auth_seen[:2]==[None,'Bearer token']
+        before=len(auth_seen)
+        with pytest.raises(SplunkError,match='fingerprint mismatch'):
+            SplunkClient(SplunkSettings(url=url,indexes='wef',tls_mode='pinned',cert_sha256='0'*64),'secret')
+        assert auth_seen[before:]==[None]
+    finally:
+        server.shutdown(); thread.join(timeout=3); server.server_close()
