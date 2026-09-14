@@ -32,6 +32,7 @@ class SplunkSettings(BaseModel):
     lag: int = Field(60, ge=10, le=3600)
     lookback: int = Field(3600, ge=60, le=7776000)
     max_events: int = Field(20000, ge=100, le=100000)
+    malformed_tolerance: int = Field(0, ge=0, le=1000)
 
     @field_validator("computer_pattern")
     @classmethod
@@ -340,9 +341,13 @@ class SplunkClient:
                         if len(report["errors"]) < 20:
                             report["errors"].append({"row": offset + index + 1, "reason": str(exc)})
                 offset += len(records)
-            if report["invalid"]:
+            if report["invalid"] > cfg.malformed_tolerance:
                 raise SplunkError(f"{report['invalid']} malformed supported events in slice; "
                     + report["errors"][0]["reason"] + ". Checkpoint not advanced")
+            if report["invalid"]:
+                report["tolerated_malformed"] = report["invalid"]
+                report["warning"] = (f"Skipped {report['invalid']} malformed event(s) under the configured "
+                    "pilot tolerance; checkpoint advanced. Review errors before production use.")
             return events, report
         finally:
             try:
