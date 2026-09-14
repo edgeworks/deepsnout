@@ -1,9 +1,10 @@
+import hashlib
 import json
 from urllib.parse import parse_qs
 import httpx
 import pytest
 from conftest import raw_event
-from deepsnout.splunk import SplunkClient,SplunkSettings,SplunkError,TooManyEvents,validate_url
+from deepsnout.splunk import SplunkClient,SplunkSettings,SplunkError,TooManyEvents,validate_url,peer_sha256
 
 
 def client_for(rows,*,status=None,broken_page=False,preview=False,messages=None):
@@ -107,3 +108,35 @@ def test_computer_selection_matches_original_not_collector():
 def test_no_spl_in_computer_pattern():
     with pytest.raises(ValueError):
         SplunkSettings(url='https://host',indexes='wef',computer_pattern='* | delete')
+
+
+def test_json_format_and_pin_validation():
+    fingerprint='97:04:69:19:BC:7F:BC:F4:16:0E:DB:FF:3E:64:C8:40:0D:91:33:63:DE:B9:EA:15:57:CD:1A:7C:DA:4A:76:7C'
+    settings=SplunkSettings(url='https://host',indexes='wef',event_format='JSON',
+        tls_mode='pinned',cert_sha256=fingerprint)
+    assert settings.event_format=='json'
+    assert settings.cert_sha256=='97046919bc7fbcf4160edbff3e64c8400d913363deb9ea1557cd1a7cda4a767c'
+    with pytest.raises(ValueError):
+        SplunkSettings(url='https://host',indexes='wef',tls_mode='pinned')
+    with pytest.raises(ValueError):
+        SplunkSettings(url='https://host',indexes='wef',event_format='evtx')
+
+
+def test_peer_fingerprint_from_tls_stream():
+    certificate=b'synthetic-der-certificate'
+    class TLS:
+        def getpeercert(self,binary=False):
+            return certificate if binary else {}
+    class Stream:
+        def get_extra_info(self,name):
+            return TLS() if name=='ssl_object' else None
+    response=httpx.Response(200,extensions={'network_stream':Stream()})
+    assert peer_sha256(response)==hashlib.sha256(certificate).hexdigest()
+
+
+def test_query_honors_explicit_json_format():
+    client,_=client_for([{'_raw':json.dumps(raw_event(3)),'index':'wef'}])
+    client.settings.event_format='json'
+    events,report=client.query(100,200)
+    assert len(events)==1 and report['invalid']==0
+    client.close()
