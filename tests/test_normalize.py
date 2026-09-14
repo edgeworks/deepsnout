@@ -121,3 +121,43 @@ def test_nesting_limit_ignores_brackets_inside_strings():
 def test_embedded_raw_json_nesting_limit():
     with pytest.raises(InvalidEvent, match="nesting"):
         normalize({"_raw": '{"result":' * 65 + '0' + '}' * 65})
+
+
+def test_cribl_named_data_json():
+    raw={"Event":{"System":{"Provider":{"Name":"Microsoft-Windows-Sysmon"},"EventID":"3",
+        "TimeCreated":{"SystemTime":"2026-09-14T10:00:00Z"},"Computer":"WS1.DOMAIN.LOCAL"},
+        "EventData":{"Data":[{"Name":"ProcessGuid","_value":"{00000000-0000-0000-0000-000000000001}"},
+        {"Name":"Image","_value":r"C:\Windows\curl.exe"},{"Name":"DestinationIp","_value":"8.8.8.8"},
+        {"Name":"DestinationPort","_value":"443"},{"Name":"Initiated","_value":"true"}]}}}
+    e=normalize({"_raw":json.dumps(raw),"host":"collector"},"json")
+    assert e.host=="ws1.domain.local" and e.event_id==3 and e.port==443 and e.initiated is True
+
+
+def test_cribl_flattened_dotted_json():
+    raw={"Event.System.Provider.Name":"Microsoft-Windows-Sysmon","Event.System.EventID":"22",
+        "Event.System.TimeCreated.SystemTime":"2026-09-14T10:00:00Z","Event.System.Computer":"WS2.DOMAIN.LOCAL",
+        "Event.EventData.QueryName":"Example.COM."}
+    e=normalize({"_raw":json.dumps(raw),"host":"collector"},"json")
+    assert e.host=="ws2.domain.local" and e.query=="example.com"
+
+
+def test_cribl_windows_json_message_and_dotnet_time():
+    raw={"Id":3,"RecordId":44,"ProviderName":"Microsoft-Windows-Sysmon","MachineName":"WS3.DOMAIN.LOCAL",
+        "TimeCreated":"/Date(1789380000000)/","Message":"Network connection detected:\nUtcTime: 2026-09-14 10:00:00.000\nProcessGuid: {00000000-0000-0000-0000-000000000001}\nImage: C:\\Windows\\x.exe\nDestinationIp: 8.8.4.4\nDestinationPort: 443\nProtocol: tcp\nInitiated: true"}
+    e=normalize({"_raw":json.dumps(raw)},"json")
+    assert e.host=="ws3.domain.local" and e.event_id==3 and e.destination=="8.8.4.4" and e.port==443
+
+
+def test_cribl_win_event_fallback():
+    raw={"Id":22,"ProviderName":"Microsoft-Windows-Sysmon","MachineName":"WS4","TimeCreated":"2026-09-14T10:00:00Z",
+        "__winEvent":{"Event":{"System":{"EventID":22,"Computer":"WS4","Provider":{"Name":"Microsoft-Windows-Sysmon"},
+        "TimeCreated":{"SystemTime":"2026-09-14T10:00:00Z"}},"EventData":{"QueryName":"Example.org"}}}}
+    e=normalize({"_raw":json.dumps(raw)},"json")
+    assert e.host=="ws4" and e.query=="example.org"
+
+
+def test_explicit_event_format_rejects_switch():
+    with pytest.raises(InvalidEvent,match="Configured JSON"):
+        normalize({"_raw":XML},"json")
+    with pytest.raises(InvalidEvent,match="Configured XML"):
+        normalize({"_raw":json.dumps(raw_event())},"xml")
