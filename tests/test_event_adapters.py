@@ -34,6 +34,23 @@ def test_symbolic_image_load_is_unsupported_not_malformed():
     assert report["invalid"] == 0
 
 
+@pytest.mark.parametrize("symbolic", ["QUEUE", "GetConfigurationOptions"])
+def test_observed_event_255_symbolic_errors_are_unsupported(symbolic):
+    events, report = parse_payload(json.dumps(flat_sysmon(Task="255", ID=symbolic)))
+    assert events == []
+    assert report["ignored"] == 1
+    assert report["invalid"] == 0
+
+
+def test_event_255_symbolic_error_requires_task_255():
+    raw = flat_sysmon(Task="16", ID="QUEUE")
+    adaptation = adapt_json_event(raw)
+    assert adaptation.unsupported_reason == ""
+    assert adaptation.detail["cribl-flat-sysmon"]["symbolic_task_mismatch"].startswith("expected 255")
+    with pytest.raises(InvalidEvent, match="after compatibility adapters"):
+        normalize({"_raw": json.dumps(raw)}, "json")
+
+
 def test_symbolic_supported_event_is_mapped_by_adapter():
     raw = flat_sysmon(
         ID="PROCESS_CREATE",
@@ -77,6 +94,8 @@ def test_task_is_only_a_correlated_compatibility_hint():
     (15, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe",
           "TargetFilename": r"C:\Temp\download.bin:Zone.Identifier", "Hash": "SHA256=" + "b" * 64,
           "Contents": "ZoneId=3"}),
+    (16, {"Configuration": r"C:\Windows\Sysmon.xml",
+          "ConfigurationFileHash": "SHA256=" + "c" * 64}),
 ])
 def test_observed_unsupported_task_shapes_are_ignored(task, extra):
     events, report = parse_payload(json.dumps(flat_sysmon(Task=str(task), **extra)))
@@ -87,6 +106,14 @@ def test_observed_unsupported_task_shapes_are_ignored(task, extra):
 
 def test_known_unsupported_task_without_signature_remains_malformed():
     raw = flat_sysmon(Task="7", ImageLoaded=r"C:\Windows\System32\library.dll")
+    adaptation = adapt_json_event(raw)
+    assert adaptation.unsupported_reason == ""
+    with pytest.raises(InvalidEvent, match="after compatibility adapters"):
+        normalize({"_raw": json.dumps(raw)}, "json")
+
+
+def test_configuration_task_without_signature_remains_malformed():
+    raw = flat_sysmon(Task="16", Configuration=r"C:\Windows\Sysmon.xml")
     adaptation = adapt_json_event(raw)
     assert adaptation.unsupported_reason == ""
     with pytest.raises(InvalidEvent, match="after compatibility adapters"):
