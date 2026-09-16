@@ -168,7 +168,7 @@ def _cribl_flat_sysmon(event):
         if task in SUPPORTED_EVENT_IDS and _task_signature_matches(event, task):
             fields["EventID"] = str(task)
             warnings.append(
-                "EventID inferred by cribl-flat-sysmon adapter from Task plus event-specific payload signature"
+                "EventID inferred from Sysmon Task by cribl-flat-sysmon adapter after event-specific payload signature validation"
             )
 
     return AdapterContribution(
