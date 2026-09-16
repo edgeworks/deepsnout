@@ -13,7 +13,8 @@ import time
 from urllib.parse import urlsplit, quote
 import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
-from .normalize import normalize, InvalidEvent, UnsupportedEvent, EVENT_FORMATS
+from .normalize import (normalize, InvalidEvent, UnsupportedEvent, EVENT_FORMATS,
+                        object_fields, scalar, clean_text)
 
 
 class SplunkSettings(BaseModel):
@@ -133,7 +134,9 @@ def validate_url(url, allow_http=False):
 
 
 class SplunkError(RuntimeError):
-    pass
+    def __init__(self, message, *, report=None):
+        super().__init__(message)
+        self.report = report or {}
 
 
 class TooManyEvents(SplunkError):
@@ -142,6 +145,123 @@ class TooManyEvents(SplunkError):
 
 def boolish(v):
     return str(v).lower() in {"1", "true"}
+
+
+def _diagnostic_text(value, limit=600):
+    """Compact, JSON-safe diagnostic rendering; never include the whole raw event."""
+    try:
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        else:
+            text = repr(value)
+    except (TypeError, ValueError, RecursionError):
+        text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "...<truncated>"
+
+
+def _candidate_paths(node, path=(), output=None, depth=0):
+    """Locate event-id-like JSON values without retaining unrelated event content."""
+    if output is None:
+        output = []
+    if depth > 32 or len(output) >= 50:
+        return output
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = path + (str(key),)
+            leaf = str(key).lower()
+            dotted = ".".join(str(part).lower() for part in child)
+            if leaf in {"eventid", "eventcode", "id", "task", "event.code"} or dotted.endswith(".event.code"):
+                output.append({"path": ".".join(child), "type": type(value).__name__,
+                               "value": _diagnostic_text(value)})
+            if isinstance(value, (dict, list)):
+                _candidate_paths(value, child, output, depth + 1)
+            if len(output) >= 50:
+                break
+    elif isinstance(node, list):
+        for index, value in enumerate(node[:50]):
+            child = path + (f"[{index}]",)
+            if isinstance(value, (dict, list)):
+                _candidate_paths(value, child, output, depth + 1)
+            if len(output) >= 50:
+                break
+    return output
+
+
+def malformed_diagnostic(row, reason):
+    """Explain parser failures while avoiding persistence of full Sysmon payloads.
+
+    This intentionally records the Splunk pointer, JSON schema keys and every
+    event-id-like candidate/path. It does not store CommandLine or the complete
+    _raw event, preserving DeepSnout's normal no-raw-log-storage boundary.
+    """
+    diag = {
+        "reason": str(reason),
+        "splunk_pointer": {key: str(row.get(key, ""))[:500]
+                           for key in ("_time", "_indextime", "index", "sourcetype",
+                                       "source", "host", "splunk_server", "_cd")
+                           if row.get(key) not in (None, "")},
+        "row_keys": sorted(str(key) for key in row.keys())[:200],
+    }
+    raw = row.get("_raw")
+    if not isinstance(raw, str):
+        diag["raw"] = {"type": type(raw).__name__, "present": raw is not None}
+        return diag
+    encoded = raw.encode("utf-8", "replace")
+    diag["raw"] = {"length": len(raw), "sha256": hashlib.sha256(encoded).hexdigest(),
+                   "looks_json": raw.lstrip("\ufeff \r\n\t").startswith("{")}
+    stripped = raw.lstrip("\ufeff \r\n\t")
+    if not stripped.startswith("{"):
+        return diag
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        diag["json_parse"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+        return diag
+    if not isinstance(parsed, dict):
+        diag["json_type"] = type(parsed).__name__
+        return diag
+    diag["json_top_level_keys"] = sorted(str(key) for key in parsed.keys())[:200]
+    diag["raw_candidate_paths"] = _candidate_paths(parsed)
+    try:
+        fields = object_fields(parsed)
+    except InvalidEvent as exc:
+        diag["object_fields_error"] = str(exc)
+        return diag
+    diag["normalized_field_keys"] = sorted(str(key) for key in fields.keys())[:250]
+    entries = {}
+    for key, value in fields.items():
+        lowered = str(key).lower()
+        if lowered in {"eventid", "eventcode", "id", "event.code", "task"}:
+            entries[lowered] = {"actual_key": str(key), "type": type(value).__name__,
+                                "raw": _diagnostic_text(value),
+                                "scalar": _diagnostic_text(scalar(value)),
+                                "cleaned": clean_text(value)[:600]}
+    diag["normalized_candidates"] = entries
+    selected = None
+    for requested in ("eventid", "eventcode", "id", "event.code"):
+        entry = entries.get(requested)
+        if entry and entry["cleaned"] != "":
+            selected = {"requested_key": requested, **entry}
+            break
+    if selected is None:
+        entry = entries.get("task")
+        if entry and entry["cleaned"] != "":
+            selected = {"requested_key": "task", **entry}
+    if selected:
+        try:
+            selected["parsed_integer"] = int(selected["cleaned"])
+        except (ValueError, TypeError):
+            selected["parsed_integer"] = None
+        diag["selected_candidate"] = selected
+    provider = next((clean_text(value) for key, value in fields.items()
+                     if str(key).lower() in {"provider", "providername", "sourcename"}
+                     and clean_text(value)), "")
+    channel = next((clean_text(value) for key, value in fields.items()
+                    if str(key).lower() == "channel" and clean_text(value)), "")
+    guid = next((clean_text(value) for key, value in fields.items()
+                 if str(key).lower() == "guid" and clean_text(value)), "")
+    diag["sysmon_identity"] = {"provider": provider[:300], "channel": channel[:300], "guid": guid[:300]}
+    return diag
 
 
 def peer_certificate(response):
@@ -315,7 +435,10 @@ class SplunkClient:
                 raise SplunkError("Invalid resultCount")
             if count >= cfg.max_events:
                 raise TooManyEvents("Slice exceeds result cap")
-            events, report = [], {"received": count, "invalid": 0, "ignored": 0, "filtered_by_computer": 0, "errors": []}
+            events, report = [], {"received": count, "invalid": 0, "ignored": 0,
+                                  "filtered_by_computer": 0, "errors": [],
+                                  "index_time_start": start, "index_time_end": end,
+                                  "malformed_tolerance": cfg.malformed_tolerance}
             offset = 0
             while offset < count:
                 if time.monotonic() >= deadline:
@@ -339,11 +462,18 @@ class SplunkClient:
                     except InvalidEvent as exc:
                         report["invalid"] += 1
                         if len(report["errors"]) < 20:
-                            report["errors"].append({"row": offset + index + 1, "reason": str(exc)})
+                            report["errors"].append({"row": offset + index + 1, "reason": str(exc),
+                                "diagnostic": malformed_diagnostic(row, exc)})
                 offset += len(records)
             if report["invalid"] > cfg.malformed_tolerance:
-                raise SplunkError(f"{report['invalid']} malformed supported events in slice; "
-                    + report["errors"][0]["reason"] + ". Checkpoint not advanced")
+                report["diagnostic_note"] = (
+                    "Detailed parser diagnostics for the first 20 malformed records are retained in this failed job. "
+                    "The full _raw event and CommandLine are not stored; use the Splunk pointer and raw SHA-256 to locate a record if needed.")
+                raise SplunkError(
+                    f"{report['invalid']} malformed supported events in slice; tolerance={cfg.malformed_tolerance}. "
+                    f"First error: {report['errors'][0]['reason']}. Detailed diagnostics are in the failed job Result. "
+                    "Checkpoint not advanced",
+                    report=report)
             if report["invalid"]:
                 report["tolerated_malformed"] = report["invalid"]
                 report["warning"] = (f"Skipped {report['invalid']} malformed event(s) under the configured "
