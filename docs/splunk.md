@@ -45,7 +45,8 @@ The current pilot includes an adapter for the observed flat Cribl Windows-event
 shape where Windows `System` values are promoted to top-level fields such as
 `sourceMachineID`, `Name`, `Guid`, `Task`, `SystemTime`, `EventRecordID` and
 `Channel`, followed by Sysmon event data. In this environment some records also
-contain a symbolic top-level `ID`, for example `IMAGE_LOAD`.
+contain a symbolic top-level `ID`, for example `IMAGE_LOAD`, `QUEUE` or
+`GetConfigurationOptions`.
 
 The core parser does **not** treat generic `ID`/`id` or Windows `Task` as EventID.
 For the flat Cribl adapter specifically:
@@ -55,25 +56,30 @@ For the flat Cribl adapter specifically:
 - supported symbolic IDs (`PROCESS_CREATE`, `NETWORK_CONNECT`, `DNS_QUERY`) may be
   translated to Event IDs 1, 3 and 22 only when the payload shape corroborates
   the event type;
-- recognized unsupported symbolic IDs such as `IMAGE_LOAD` are counted as ignored;
-  unknown symbolic IDs remain malformed so a new upstream dialect is not hidden;
+- recognized unsupported symbolic IDs are counted as ignored; currently verified
+  cases are `IMAGE_LOAD`, plus Event-255 error identifiers `QUEUE` and
+  `GetConfigurationOptions`. The two Event-255 identifiers additionally require
+  `Task=255`; an unexpected Task keeps the record malformed;
 - when `ID` is absent, `Task` is only a compatibility hint. Tasks 1, 3 and 22 are
   accepted only when event-specific payload fields corroborate the supported type;
 - observed unsupported Task values are also ignored only when both the Task value
   and an event-family payload signature match. The pilot currently has verified
-  signatures for Tasks 2, 4, 5, 6, 7, 8, 11, 12, 13 and 15;
-- an unknown Task, or a known Task whose payload no longer matches the verified
-  signature, remains malformed and blocks the checkpoint unless an explicit pilot
-  tolerance permits it;
+  signatures for Tasks 2, 4, 5, 6, 7, 8, 11, 12, 13, 15 and 16;
+- an unknown Task, an unknown symbolic ID, or a known value whose payload no longer
+  matches the verified signature remains malformed and blocks the checkpoint unless
+  an explicit pilot tolerance permits it;
 - every successful supported Task/symbolic-ID inference adds a normalization warning.
 
 This deliberately avoids claiming that Windows `Task` is universally equivalent
 to Sysmon EventID. In the observed Cribl stream many Task values line up with the
 corresponding Sysmon event family, while earlier samples also showed alternate
 serialization behavior. The adapter therefore requires corroborating fields and
-keeps these rules outside the cross-environment parser contract. If the upstream
-format changes, the adapter can fail visibly or be revised without changing XML,
-canonical JSON or another vendor's `Id` semantics.
+keeps these rules outside the cross-environment parser contract. Event 16 is the
+Sysmon configuration-change family; Event 255 is Sysmon's internal error family.
+The observed `QUEUE` and `GetConfigurationOptions` values are treated as verified
+Event-255 subtypes only inside this adapter, not as general event-name aliases.
+If the upstream format changes, the adapter can fail visibly or be revised without
+changing XML, canonical JSON or another vendor's `Id` semantics.
 
 If the selected Splunk sourcetype contains a mixed Windows Event Log stream, the
 flat-system adapter preserves top-level `Name` as the provider. Non-Sysmon
