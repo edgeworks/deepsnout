@@ -1,8 +1,8 @@
-# Verification report - 0.1.0a5
+# Verification report - 0.1.0a7
 
 ## Automated verification
 
-The 0.1.0a5 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a7 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.
@@ -22,19 +22,25 @@ python -m pytest --cov=deepsnout --cov-report=term-missing -W error::sqlalchemy.
 ```
 
 It covers safe parsing, source time/identity, XML and JSON Sysmon normalization,
-common Cribl Windows-event JSON layouts including the observed flat
-`sourceMachineID`/`Name`/`Guid`/`Task` shape, explicit payload-format enforcement,
+common structured Windows-event JSON layouts, explicit payload-format enforcement,
 replay handling, peer qualification, same-day exclusion, scoped expectations,
 capacities, retention, Splunk source pagination/failure rollback, source TLS-pin
 configuration/fingerprint extraction, role/CSRF controls, command privacy,
 settings, account recovery, secret separation and GUI routes/decisions.
 
-The flat Cribl regression omits EventID exactly like the observed production
-sample. DeepSnout accepts Task as the event type only after provider, channel or
-the exact Sysmon provider GUID establishes Sysmon. Additional regressions cover
-the same fallback for supported Event 3 and Event 22 inputs and verify that a flat
-non-Sysmon Windows provider in a mixed sourcetype is counted as ignored rather
-than malformed.
+Environment-specific JSON semantics are exercised separately through the built-in
+compatibility-adapter seam. Regressions cover the observed flat Cribl
+`sourceMachineID`/`Name`/`Guid`/`Task` shape, trusted-provider/GUID detection,
+Event 1/3/22 Task hints only when the corresponding payload signature corroborates
+the type, symbolic supported IDs, and `ID=IMAGE_LOAD`/`Task=255` being classified
+as unsupported rather than malformed. A flat non-Sysmon Windows provider in a
+mixed sourcetype remains ignored rather than being interpreted with Sysmon rules.
+The core parser no longer treats generic `ID`/`id` or `Task` as EventID.
+
+Splunk malformed-event diagnostics are regression-tested as grouped failure
+signatures rather than only the first 20 records. Repeated failures are counted,
+later distinct signatures remain visible, and each group keeps bounded sample
+pointers/schema/candidate details without persisting full `_raw` or CommandLine.
 
 The pinned-TLS implementation was also exercised during development against a
 local HTTPS server with a self-signed certificate whose hostname deliberately did
@@ -68,8 +74,10 @@ independent security audit or a production-capacity certification.
 No real Splunk deployment is available to GitHub Actions. Splunk behavior is
 covered with contract/mock tests until an operator pilot exercises the actual
 management/search API, certificate mode, permissions, sourcetype and event format.
-The Cribl JSON normalizer intentionally accepts several common representations but
-cannot infer arbitrary organization-specific field renames without a real sample.
+The JSON normalizer intentionally accepts several common representations, while
+unusual collector-specific semantics belong in explicit compatibility adapters;
+neither layer can infer arbitrary organization-specific field renames without a
+real sample.
 
 The bundled Caddy test validates the generated local-CA chain and the HTTPS
 application flow for `localhost`. It does not validate an organization's PKI,
@@ -108,8 +116,8 @@ count.
 
 The parser explicitly rejects JSON deeper than 64 levels, including embedded
 `_raw` JSON, while ignoring brackets inside quoted strings. Regression tests cover
-arrays, objects, escaped strings, `_raw`, explicit JSON/XML source modes and common
-Cribl layouts.
+arrays, objects, escaped strings, `_raw`, explicit JSON/XML source modes, common
+structured JSON layouts and the registered compatibility adapters.
 
 The secret initializer creates exported DB credentials only when absent, verifies
 existing contents and refuses mismatched secret volumes rather than silently
