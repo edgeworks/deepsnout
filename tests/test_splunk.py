@@ -204,7 +204,7 @@ def test_pinned_tls_wrong_hostname_and_fail_closed(tmp_path):
         .public_key(leaf_key.public_key()).serial_number(x509.random_serial_number())
         .not_valid_before(now-timedelta(minutes=1)).not_valid_after(now+timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=False,path_length=None),critical=True)
-        .add_extension(x509.KeyUsage(digital_signature=True,content_commitment_false=False,key_encipherment=True,
+        .add_extension(x509.KeyUsage(digital_signature=True,content_commitment=False,key_encipherment=True,
             data_encipherment=False,key_agreement=False,key_cert_sign=False,crl_sign=False,
             encipher_only=None,decipher_only=None),critical=True)
         .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]),critical=False)
