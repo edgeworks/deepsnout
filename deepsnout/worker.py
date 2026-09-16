@@ -131,10 +131,11 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         from .splunk import SplunkError
         from .engine import CapacityError
         message = str(exc)[:600] if isinstance(exc, (SplunkError, CapacityError, ValueError)) else type(exc).__name__ + ": inspect worker logs"
+        failure_report = exc.report if isinstance(exc, SplunkError) and exc.report else {}
         LOG.error("Job %s failed (%s)", job_id, type(exc).__name__)
         with transaction(engine) as db:
             job = db.get(Job, job_id)
-            job.status, job.finished, job.error = "failed", now(), message
+            job.status, job.finished, job.error, job.report = "failed", now(), message, failure_report
             if job.source_id:
                 source = db.get(Source, job.source_id)
                 if source:
