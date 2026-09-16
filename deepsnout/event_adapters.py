@@ -59,7 +59,9 @@ def _flat_windows_shape(event):
         return False
     markers = sum(key in event for key in
                   ("Task", "Guid", "Channel", "sourceMachineID", "SystemTime", "EventRecordID"))
-    return "Name" in event and markers >= 2
+    # Three independent Windows-System-like markers keep this adapter narrow while
+    # still supporting records where Cribl dropped Name but retained provider GUID.
+    return markers >= 3
 
 
 def _trusted_sysmon(event):
@@ -140,6 +142,11 @@ def _cribl_flat_sysmon(event):
             if numeric in SUPPORTED_EVENT_IDS:
                 fields["EventID"] = str(numeric)
                 warnings.append("EventID inferred by cribl-flat-sysmon adapter from numeric ID")
+            else:
+                return AdapterContribution(
+                    "cribl-flat-sysmon", fields=fields, warnings=tuple(warnings),
+                    unsupported_reason=f"Unsupported numeric Sysmon event type from cribl-flat-sysmon adapter: {numeric}",
+                    detail=detail)
         else:
             return AdapterContribution(
                 "cribl-flat-sysmon",
