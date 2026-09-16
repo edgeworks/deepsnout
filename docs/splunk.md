@@ -21,30 +21,56 @@ renderXml = true
 index = YOUR_EXISTING_INDEX
 ```
 
-Cribl in front of Splunk is also supported. The JSON normalizer accepts the
-nested Windows-event shape, flattened dotted fields, common XML-to-JSON `Data`
-arrays (`Name` plus text/value variants), the Cribl `__winEvent` fallback when it
-is retained, and the Windows Event Logs/Get-WinEvent-style system fields such as
-`Id`, `ProviderName`, `MachineName`, `RecordId` and `TimeCreated`. If a rendered
-Sysmon `Message` is present, named `Key: value` lines are used as a fallback.
-That fallback is not a substitute for preserving structured event data because
-rendered messages can be localized or transformed.
+The transport-neutral normalizer understands standard XML plus common structured
+JSON representations: nested Windows `Event/System/EventData`, flattened dotted
+fields, XML-to-JSON `Data` arrays (`Name` plus text/value variants),
+`__winEvent` when retained, Elastic-style `winlog.event_id`, and Windows Event
+Logs/Get-WinEvent-style fields such as exact-case `Id`, `ProviderName`,
+`MachineName`, `RecordId` and `TimeCreated`. If a rendered Sysmon `Message` is
+present, named `Key: value` lines are used as a fallback. Rendered messages are
+not a substitute for structured event data because they can be localized or
+transformed.
 
-A second flat Cribl shape is also supported where the original Windows `System`
-fields are promoted to the top level, for example `sourceMachineID`, `Name`,
-`Guid`, `Task`, `SystemTime`, `EventRecordID` and `Channel`, followed by the Sysmon
-event data such as `UtcTime`, `ProcessGuid`, `Image` and `DestinationIp`. Some
-pipelines of this form omit `EventID`. DeepSnout uses `Task` as the event type only
-when the provider name, Sysmon channel or exact Sysmon provider GUID independently
-establishes that the record is a Sysmon event; it records a normalization warning
-when this fallback is used. `Task` is never accepted as a generic event ID for an
-unidentified provider.
+### JSON compatibility adapters
 
-If the selected Splunk sourcetype contains a mixed Windows Event Log stream,
-DeepSnout preserves the flat top-level `Name` as the provider. Non-Sysmon providers
-or an explicitly non-Sysmon channel are counted as ignored/unsupported rather than
-as malformed Sysmon. Records that cannot be identified either way still fail the
-slice instead of being silently discarded.
+Collector/vendor-specific JSON semantics are intentionally kept outside the core
+normalizer. Built-in compatibility functions are registered in
+`deepsnout/event_adapters.py`: they may contribute canonical fields only when a
+narrow source shape matches. Explicit/canonical fields always take precedence.
+This is an internal plugin-like seam, not a dynamic third-party code loader; a new
+organization-specific dialect should normally be implemented as another small
+adapter rather than adding special cases to core EventID logic.
+
+The current pilot includes an adapter for the observed flat Cribl Windows-event
+shape where Windows `System` values are promoted to top-level fields such as
+`sourceMachineID`, `Name`, `Guid`, `Task`, `SystemTime`, `EventRecordID` and
+`Channel`, followed by Sysmon event data. In this environment some records also
+contain a symbolic top-level `ID`, for example `IMAGE_LOAD`.
+
+The core parser does **not** treat generic `ID`/`id` or Windows `Task` as EventID.
+For the flat Cribl adapter specifically:
+
+- provider/channel/provider GUID must independently identify Sysmon before Sysmon
+  compatibility semantics are applied;
+- supported symbolic IDs (`PROCESS_CREATE`, `NETWORK_CONNECT`, `DNS_QUERY`) may be
+  translated to Event IDs 1, 3 and 22;
+- other trusted symbolic/numeric Sysmon IDs are classified as unsupported, so an
+  `IMAGE_LOAD` record is ignored rather than reported malformed;
+- when `ID` is absent, `Task` is only a compatibility hint for Event 1, 3 or 22 and
+  is accepted only when event-specific payload fields corroborate that type (for
+  example DestinationIp/DestinationPort for Event 3 or QueryName for Event 22);
+- every successful Task/symbolic-ID inference adds a normalization warning.
+
+This deliberately avoids generalizing an unusual Cribl serialization into the
+cross-environment parser contract. If that upstream format changes, the adapter
+can fail visibly or be revised without changing XML, canonical JSON or another
+vendor's `Id` semantics.
+
+If the selected Splunk sourcetype contains a mixed Windows Event Log stream, the
+flat-system adapter preserves top-level `Name` as the provider. Non-Sysmon
+providers or an explicitly non-Sysmon channel are counted as ignored/unsupported
+rather than as malformed Sysmon. Records that cannot be identified safely still
+fail the slice instead of being silently discarded.
 
 Verify the actual sourcetype and payload in your deployment. Do not blindly apply
 the UF stanza to a WEF or Cribl path: subscription, collector identity and
@@ -76,8 +102,8 @@ Choose the event payload format:
 - **XML** similarly requires XML `_raw`.
 
 Explicit JSON/XML mode is useful during a pilot because an unexpected upstream
-Cribl serialization change becomes a visible source failure instead of a silent
-format switch.
+serialization change becomes a visible source failure instead of a silent format
+switch.
 
 Choose **Bearer** for a Splunk authentication token and **Splunk** for a session
 key. Credentials are encrypted and never redisplayed. Long-running sources should
@@ -140,6 +166,12 @@ finalization, missing results or malformed supported events fail the slice. No
 cursor advance occurs on failure. Unsupported event types and recognized
 non-Sysmon providers are explicitly counted as ignored.
 
+Malformed Splunk records are grouped by parser-failure signature in the job
+Result (up to 50 distinct groups), with counts and up to three Splunk pointers per
+group. This prevents one repeated malformed shape from hiding a later failure
+class. The full `_raw` and CommandLine are not persisted; the group sample keeps
+schema/candidate/adapter diagnostics plus a raw SHA-256 for source lookup.
+
 Index-time scopes are half-open and explicitly checked using `_indextime`.
 Original UtcTime/SystemTime/TimeCreated drives comparison. Over-cap slices are
 bisected, never silently truncated. If one indexed second exceeds the configured
@@ -165,7 +197,7 @@ original Computer/MachineName/sourceMachineID, time, GUID, invalid token/CA/pin
 handling, pause/resume, restart while polling, duplicates and multi-page slices.
 For a Cribl path, inspect at least one real Event 1, 3 and 22 payload before
 expanding scope; arbitrary organization-specific Cribl renames cannot be inferred
-by the normalizer.
+by the normalizer or compatibility adapters without a real sample.
 
 This release has contract/mock tests and local TLS pin tests during development,
 not a live Splunk compatibility certification.
