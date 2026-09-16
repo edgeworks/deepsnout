@@ -65,6 +65,31 @@ def test_invalid_supported_cannot_skip():
     client.close()
 
 
+def test_failed_parse_keeps_detailed_candidate_diagnostics():
+    raw=raw_event()
+    raw.pop('EventID')
+    raw.update(Task='1',Name="'Microsoft-Windows-Sysmon'",
+        Guid="'{5770385f-c22a-43e0-bf4c-06f5698ffbd9}'",
+        Channel='Microsoft-Windows-Sysmon/Operational',Wrapper={'EventID':'Process Create'})
+    row={'_raw':json.dumps(raw),'_time':'2026-09-14T13:33:12Z','_indextime':'1789392792',
+         'index':'wef','sourcetype':'sysmon-json','host':'collector','_cd':'1:2'}
+    client,_=client_for([row])
+    with pytest.raises(SplunkError,match='Detailed diagnostics') as caught:
+        client.query(100,200)
+    report=caught.value.report
+    assert report['invalid']==1 and report['index_time_start']==100 and report['index_time_end']==200
+    error=report['errors'][0]
+    diagnostic=error['diagnostic']
+    assert diagnostic['selected_candidate']['requested_key']=='eventid'
+    assert diagnostic['selected_candidate']['cleaned']=='Process Create'
+    assert diagnostic['selected_candidate']['parsed_integer'] is None
+    assert diagnostic['normalized_candidates']['task']['cleaned']=='1'
+    assert any(item['path']=='Wrapper.EventID' for item in diagnostic['raw_candidate_paths'])
+    assert diagnostic['raw']['sha256'] and '_raw' in diagnostic['row_keys']
+    assert 'CommandLine' not in json.dumps(diagnostic)
+    client.close()
+
+
 def test_explicit_malformed_tolerance_allows_pilot_progress():
     client,_=client_for([raw_event(),{'EventCode':'3'},raw_event(n=2)])
     client.settings.malformed_tolerance=1
