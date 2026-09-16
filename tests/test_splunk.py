@@ -74,19 +74,41 @@ def test_failed_parse_keeps_detailed_candidate_diagnostics():
     row={'_raw':json.dumps(raw),'_time':'2026-09-14T13:33:12Z','_indextime':'1789392792',
          'index':'wef','sourcetype':'sysmon-json','host':'collector','_cd':'1:2'}
     client,_=client_for([row])
-    with pytest.raises(SplunkError,match='Detailed diagnostics') as caught:
+    with pytest.raises(SplunkError,match='Grouped diagnostics') as caught:
         client.query(100,200)
     report=caught.value.report
     assert report['invalid']==1 and report['index_time_start']==100 and report['index_time_end']==200
-    error=report['errors'][0]
-    diagnostic=error['diagnostic']
+    group=report['diagnostic_groups'][0]
+    assert group['count']==1 and group['sample_rows']==[1]
+    diagnostic=group['sample']
     assert diagnostic['selected_candidate']['requested_key']=='eventid'
     assert diagnostic['selected_candidate']['cleaned']=='Process Create'
     assert diagnostic['selected_candidate']['parsed_integer'] is None
     assert diagnostic['normalized_candidates']['task']['cleaned']=='1'
     assert any(item['path']=='Wrapper.EventID' for item in diagnostic['raw_candidate_paths'])
     assert diagnostic['raw']['sha256'] and '_raw' in diagnostic['row_keys']
+    assert 'cribl-flat-sysmon' in diagnostic['compatibility']['adapters']
     assert raw['CommandLine'] not in json.dumps(diagnostic)
+    client.close()
+
+
+def test_diagnostics_group_repeated_failures_and_keep_later_signatures():
+    rows=[]
+    for i in range(25):
+        raw=raw_event(n=i+1); raw['EventID']='bad-a'
+        rows.append({'_raw':json.dumps(raw),'_time':'2026-09-14T13:33:12Z','_indextime':str(100+i),
+                     'index':'wef','sourcetype':'sysmon-json','host':'collector','_cd':f'1:{i}'})
+    for i in range(3):
+        raw=raw_event(n=100+i); raw['EventID']='bad-b'
+        rows.append({'_raw':json.dumps(raw),'_time':'2026-09-14T13:34:12Z','_indextime':str(200+i),
+                     'index':'wef','sourcetype':'sysmon-json','host':'collector','_cd':f'2:{i}'})
+    client,_=client_for(rows)
+    with pytest.raises(SplunkError) as caught:
+        client.query(100,300)
+    groups=caught.value.report['diagnostic_groups']
+    assert sorted(group['count'] for group in groups)==[3,25]
+    assert {group['signature']['selected']['cleaned'] for group in groups}=={'bad-a','bad-b'}
+    assert all(len(group['sample_pointers'])<=3 for group in groups)
     client.close()
 
 
