@@ -1,8 +1,8 @@
-# Verification report - 0.1.0a7
+# Verification report - 0.1.0a8
 
 ## Automated verification
 
-The 0.1.0a7 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a8 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.
@@ -32,10 +32,14 @@ Environment-specific JSON semantics are exercised separately through the built-i
 compatibility-adapter seam. Regressions cover the observed flat Cribl
 `sourceMachineID`/`Name`/`Guid`/`Task` shape, trusted-provider/GUID detection,
 Event 1/3/22 Task hints only when the corresponding payload signature corroborates
-the type, symbolic supported IDs, and `ID=IMAGE_LOAD`/`Task=255` being classified
-as unsupported rather than malformed. A flat non-Sysmon Windows provider in a
-mixed sourcetype remains ignored rather than being interpreted with Sysmon rules.
-The core parser no longer treats generic `ID`/`id` or `Task` as EventID.
+the type, supported symbolic IDs, and the observed unsupported Sysmon families
+represented by Tasks 2, 4, 5, 6, 7, 8, 11, 12, 13 and 15. Those unsupported
+families are counted as ignored only when their event-specific payload signature
+also matches. Known Tasks with incomplete/mismatched fields, unknown Tasks and
+unknown symbolic IDs remain malformed. `ID=IMAGE_LOAD` is a separately verified
+unsupported symbolic case. A flat non-Sysmon Windows provider in a mixed
+sourcetype remains ignored rather than being interpreted with Sysmon rules. The
+core parser does not treat generic `ID`/`id` or `Task` as EventID.
 
 Splunk malformed-event diagnostics are regression-tested as grouped failure
 signatures rather than only the first 20 records. Repeated failures are counted,
