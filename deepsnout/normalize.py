@@ -8,13 +8,14 @@ import ntpath
 import re
 from defusedxml import ElementTree as ET
 
+from .event_adapters import adapt_json_event
+from .event_contract import (SUPPORTED_EVENT_IDS, SYSMON_CHANNEL,
+                             SYSMON_PROVIDER_GUID, SYSMON_PROVIDERS)
+
 VERSION = "sysmon-v1"
-SUPPORTED = {1, 3, 22}
+SUPPORTED = SUPPORTED_EVENT_IDS
 GUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 EVENT_FORMATS = {"auto", "xml", "json"}
-SYSMON_PROVIDERS = {"microsoft-windows-sysmon", "sysmon"}
-SYSMON_CHANNEL = "microsoft-windows-sysmon/operational"
-SYSMON_PROVIDER_GUID = "5770385f-c22a-43e0-bf4c-06f5698ffbd9"
 
 
 class InvalidEvent(ValueError):
@@ -69,7 +70,7 @@ def scalar(value):
 
 
 def clean_text(value):
-    """Normalize scalar text and remove one Cribl-style wrapping quote pair."""
+    """Normalize scalar text and remove one matching wrapping quote pair."""
     value = scalar(value)
     if value is None:
         return ""
@@ -210,10 +211,11 @@ def _named_data(node):
 
 
 def _collect_json_fields(node, fields, path=(), depth=0):
-    """Fill known Sysmon fields from tolerant Cribl/XML-to-JSON layouts.
+    """Fill known Sysmon fields from tolerant nested/flattened JSON layouts.
 
     Explicit schema-aware extraction runs first; this is a bounded fallback for
-    flattened dotted keys, attribute containers and named Data arrays.
+    flattened dotted keys, attribute containers and named Data arrays. Source-
+    specific semantics such as Cribl Task/ID interpretation live in event_adapters.
     """
     if depth > 64:
         raise InvalidEvent("JSON nesting exceeds 64 levels")
@@ -235,36 +237,24 @@ def _collect_json_fields(node, fields, path=(), depth=0):
             _collect_json_fields(value, fields, path, depth + 1)
 
 
-def object_fields(obj):
+def object_fields(obj, metadata=None):
     if not isinstance(obj, dict):
         raise InvalidEvent("Expected a JSON event object")
     fields = {}
     event = obj.get("Event", obj)
     if not isinstance(event, dict):
         return fields
+    adaptation = adapt_json_event(event)
     for key, value in event.items():
         if not isinstance(value, (dict, list)):
             fields[key] = value
-    # Cribl Windows Event Logs JSON / Get-WinEvent-style system fields. Event
-    # payload values are recovered from __winEvent or Message below when present.
+    # Windows Event Logs/Get-WinEvent-style system fields. The exact-case Id
+    # alias is handled here; generic ID/id is deliberately not an EventID.
     for src, dest in (("Id", "EventID"), ("RecordId", "EventRecordID"),
                       ("MachineName", "Computer"), ("sourceMachineID", "Computer"),
                       ("TimeCreated", "SystemTime")):
         if src in event and not isinstance(event[src], (dict, list)):
             fields.setdefault(dest, event[src])
-    # Some Cribl Windows Event Log pipelines flatten the XML System block into
-    # top-level keys. In that shape Name is the provider name and EventID may be
-    # omitted even though the original Windows Task remains present. Preserve the
-    # provider even when it is not Sysmon so a mixed Windows-event sourcetype can
-    # be ignored safely instead of being reported as malformed Sysmon.
-    provider_name = clean_text(event.get("Name", ""))
-    channel = clean_text(event.get("Channel", ""))
-    flat_system_shape = any(key in event for key in
-                            ("Task", "Guid", "Channel", "sourceMachineID", "SystemTime", "EventRecordID"))
-    if provider_name and flat_system_shape:
-        fields.setdefault("Provider", provider_name)
-    elif channel.lower() == SYSMON_CHANNEL:
-        fields.setdefault("Provider", "Microsoft-Windows-Sysmon")
     message = event.get("Message")
     if isinstance(message, str):
         for match in re.finditer(r"(?m)^\s*([A-Za-z][A-Za-z0-9_. ]{0,70})\s*:\s*(.*?)\s*$", message):
@@ -304,6 +294,16 @@ def object_fields(obj):
             if src in winlog:
                 fields[dest] = scalar(winlog[src])
     _collect_json_fields(event, fields)
+    # Adapters only fill gaps. Explicit/canonical source fields always win.
+    for key, value in adaptation.fields.items():
+        fields.setdefault(key, value)
+    if metadata is not None:
+        metadata.update({
+            "adapters": list(adaptation.names),
+            "adapter_warnings": list(adaptation.warnings),
+            "adapter_unsupported_reason": adaptation.unsupported_reason,
+            "adapter_detail": adaptation.detail,
+        })
     return fields
 
 
@@ -341,7 +341,8 @@ def normalize(record, event_format="auto"):
     if isinstance(envelope.get("result"), dict):
         envelope = envelope["result"]
     raw = envelope.get("_raw", record if isinstance(record, str) else None)
-    fields = object_fields(envelope)
+    adapter_meta = {}
+    fields = object_fields(envelope, adapter_meta)
     if isinstance(raw, str):
         stripped = raw.lstrip("\ufeff \r\n\t")
         if event_format == "xml" and not stripped.startswith("<"):
@@ -352,11 +353,15 @@ def normalize(record, event_format="auto"):
             if event_format == "json":
                 raise InvalidEvent("Configured JSON source returned XML _raw")
             fields.update(xml_fields(stripped))
+            adapter_meta = {}
         elif stripped.startswith("{"):
             if event_format == "xml":
                 raise InvalidEvent("Configured XML source returned JSON _raw")
             try:
-                fields.update(object_fields(load_json(stripped)))
+                raw_meta = {}
+                fields.update(object_fields(load_json(stripped), raw_meta))
+                if raw_meta.get("adapters"):
+                    adapter_meta = raw_meta
             except (json.JSONDecodeError, RecursionError):
                 raise InvalidEvent("Malformed JSON inside _raw") from None
         elif event_format in {"xml", "json"}:
@@ -384,28 +389,24 @@ def normalize(record, event_format="auto"):
         raise UnsupportedEvent("Not a Sysmon provider")
     if not provider and channel and not channel_is_sysmon:
         raise UnsupportedEvent("Not a Sysmon channel")
-    eid_text = get("EventID", "EventCode", "Id", "event.code")
-    inferred_from_task = False
+    # Core semantics accept only explicit/canonical event identifiers. Generic
+    # Id/ID and Windows Task are not event IDs here; dialect-specific adapters
+    # must translate them into EventID when they can do so safely.
+    eid_text = get("EventID", "EventCode", "event.code")
     if not eid_text:
-        task = get("Task")
-        trusted_sysmon = provider_is_sysmon or channel_is_sysmon or guid_is_sysmon
-        if task and trusted_sysmon:
-            eid_text = task
-            inferred_from_task = True
-        elif task:
-            raise InvalidEvent("Missing Sysmon EventID/EventCode; Task present but Sysmon provider/channel/GUID markers absent")
-        else:
-            raise InvalidEvent("Missing Sysmon EventID/EventCode; no Task fallback field present")
+        unsupported = adapter_meta.get("adapter_unsupported_reason", "")
+        if unsupported:
+            raise UnsupportedEvent(unsupported)
+        adapters = ", ".join(adapter_meta.get("adapters", [])) or "none"
+        raise InvalidEvent(f"Missing Sysmon EventID/EventCode after compatibility adapters (matched: {adapters})")
     try:
         eid = int(eid_text)
     except ValueError:
-        raise InvalidEvent("Invalid Sysmon EventID/EventCode or Task value") from None
+        raise InvalidEvent("Invalid explicit/canonical Sysmon EventID/EventCode value") from None
     if eid not in SUPPORTED:
         raise UnsupportedEvent("Sysmon event type not implemented")
     host = get("Computer", "ComputerName", "MachineName", "sourceMachineID").lower().rstrip(".")
-    warnings = []
-    if inferred_from_task:
-        warnings.append("EventID inferred from Sysmon Task because upstream JSON omitted EventID")
+    warnings = list(adapter_meta.get("adapter_warnings", []))
     if not host:
         host = str(envelope.get("host", "")).lower().rstrip(".")
         warnings.append("Endpoint identity fell back to collector host; verify the source")
