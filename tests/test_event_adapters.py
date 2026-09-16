@@ -7,6 +7,9 @@ from deepsnout.normalize import InvalidEvent, normalize, parse_payload
 
 
 SYSMON_GUID = "'{5770385f-c22a-43e0-bf4c-06f5698ffbd9}'"
+PROCESS_GUID = "{00000000-0000-0000-0000-000000000001}"
+PARENT_GUID = "{00000000-0000-0000-0000-000000000002}"
+TARGET_GUID = "{00000000-0000-0000-0000-000000000003}"
 
 
 def flat_sysmon(**extra):
@@ -34,8 +37,8 @@ def test_symbolic_image_load_is_unsupported_not_malformed():
 def test_symbolic_supported_event_is_mapped_by_adapter():
     raw = flat_sysmon(
         ID="PROCESS_CREATE",
-        ProcessGuid="{00000000-0000-0000-0000-000000000001}",
-        ParentProcessGuid="{00000000-0000-0000-0000-000000000002}",
+        ProcessGuid=PROCESS_GUID,
+        ParentProcessGuid=PARENT_GUID,
         Image=r"C:\Windows\System32\cmd.exe",
         ParentImage=r"C:\Windows\explorer.exe",
     )
@@ -49,6 +52,59 @@ def test_task_is_only_a_correlated_compatibility_hint():
     adaptation = adapt_json_event(raw)
     assert "cribl-flat-sysmon" in adaptation.names
     assert "EventID" not in adaptation.fields
+    with pytest.raises(InvalidEvent, match="after compatibility adapters"):
+        normalize({"_raw": json.dumps(raw)}, "json")
+
+
+@pytest.mark.parametrize("task,extra", [
+    (2, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe",
+         "TargetFilename": r"C:\Temp\a.tmp", "CreationUtcTime": "2026-09-14 11:57:00.000",
+         "PreviousCreationUtcTime": "2026-09-13 11:57:00.000"}),
+    (4, {"State": "Started", "SchemaVersion": "4.90"}),
+    (5, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe"}),
+    (6, {"ImageLoaded": r"C:\Windows\System32\driver.sys", "Hashes": "SHA256=" + "a" * 64,
+         "Signed": "true", "SignatureStatus": "Valid"}),
+    (7, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe",
+         "ImageLoaded": r"C:\Windows\System32\library.dll"}),
+    (8, {"SourceProcessGuid": PROCESS_GUID, "TargetProcessGuid": TARGET_GUID,
+         "NewThreadId": "1234", "StartAddress": "0x7ff00000"}),
+    (11, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe",
+          "TargetFilename": r"C:\Temp\created.bin", "CreationUtcTime": "2026-09-14 11:57:00.000"}),
+    (12, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe",
+          "TargetObject": r"HKLM\Software\Example", "EventType": "CreateKey"}),
+    (13, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe",
+          "TargetObject": r"HKLM\Software\Example\Value", "EventType": "SetValue", "Details": "DWORD (0x1)"}),
+    (15, {"ProcessGuid": PROCESS_GUID, "Image": r"C:\Windows\x.exe",
+          "TargetFilename": r"C:\Temp\download.bin:Zone.Identifier", "Hash": "SHA256=" + "b" * 64,
+          "Contents": "ZoneId=3"}),
+])
+def test_observed_unsupported_task_shapes_are_ignored(task, extra):
+    events, report = parse_payload(json.dumps(flat_sysmon(Task=str(task), **extra)))
+    assert events == []
+    assert report["ignored"] == 1
+    assert report["invalid"] == 0
+
+
+def test_known_unsupported_task_without_signature_remains_malformed():
+    raw = flat_sysmon(Task="7", ImageLoaded=r"C:\Windows\System32\library.dll")
+    adaptation = adapt_json_event(raw)
+    assert adaptation.unsupported_reason == ""
+    with pytest.raises(InvalidEvent, match="after compatibility adapters"):
+        normalize({"_raw": json.dumps(raw)}, "json")
+
+
+def test_unknown_task_remains_malformed():
+    raw = flat_sysmon(Task="99", ProcessGuid=PROCESS_GUID, Image=r"C:\Windows\x.exe")
+    adaptation = adapt_json_event(raw)
+    assert adaptation.unsupported_reason == ""
+    with pytest.raises(InvalidEvent, match="after compatibility adapters"):
+        normalize({"_raw": json.dumps(raw)}, "json")
+
+
+def test_unknown_symbolic_id_remains_malformed():
+    raw = flat_sysmon(ID="SOMETHING_NEW", ProcessGuid=PROCESS_GUID, Image=r"C:\Windows\x.exe")
+    adaptation = adapt_json_event(raw)
+    assert adaptation.unsupported_reason == ""
     with pytest.raises(InvalidEvent, match="after compatibility adapters"):
         normalize({"_raw": json.dumps(raw)}, "json")
 
