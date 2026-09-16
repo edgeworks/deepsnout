@@ -190,9 +190,9 @@ def _candidate_paths(node, path=(), output=None, depth=0):
 def malformed_diagnostic(row, reason):
     """Explain parser failures while avoiding persistence of full Sysmon payloads.
 
-    This intentionally records the Splunk pointer, JSON schema keys and every
-    event-id-like candidate/path. It does not store CommandLine or the complete
-    _raw event, preserving DeepSnout's normal no-raw-log-storage boundary.
+    This intentionally records the Splunk pointer, JSON schema keys, compatibility
+    adapter metadata and event-id-like candidates. It does not store CommandLine or
+    the complete _raw event, preserving DeepSnout's normal no-raw-log-storage boundary.
     """
     diag = {
         "reason": str(reason),
@@ -223,11 +223,19 @@ def malformed_diagnostic(row, reason):
     diag["json_top_level_keys"] = sorted(str(key) for key in parsed.keys())[:200]
     diag["raw_candidate_paths"] = _candidate_paths(parsed)
     try:
-        fields = object_fields(parsed)
+        adapter_meta = {}
+        fields = object_fields(parsed, adapter_meta)
     except InvalidEvent as exc:
         diag["object_fields_error"] = str(exc)
         return diag
     diag["normalized_field_keys"] = sorted(str(key) for key in fields.keys())[:250]
+    if adapter_meta.get("adapters"):
+        diag["compatibility"] = {
+            "adapters": adapter_meta.get("adapters", []),
+            "warnings": adapter_meta.get("adapter_warnings", []),
+            "unsupported_reason": adapter_meta.get("adapter_unsupported_reason", ""),
+            "detail": adapter_meta.get("adapter_detail", {}),
+        }
     entries = {}
     for key, value in fields.items():
         lowered = str(key).lower()
@@ -238,15 +246,12 @@ def malformed_diagnostic(row, reason):
                                 "cleaned": clean_text(value)[:600]}
     diag["normalized_candidates"] = entries
     selected = None
-    for requested in ("eventid", "eventcode", "id", "event.code"):
+    # Mirror core resolution: generic Id/ID and Task are diagnostic context only.
+    for requested in ("eventid", "eventcode", "event.code"):
         entry = entries.get(requested)
         if entry and entry["cleaned"] != "":
             selected = {"requested_key": requested, **entry}
             break
-    if selected is None:
-        entry = entries.get("task")
-        if entry and entry["cleaned"] != "":
-            selected = {"requested_key": "task", **entry}
     if selected:
         try:
             selected["parsed_integer"] = int(selected["cleaned"])
@@ -262,6 +267,53 @@ def malformed_diagnostic(row, reason):
                  if str(key).lower() == "guid" and clean_text(value)), "")
     diag["sysmon_identity"] = {"provider": provider[:300], "channel": channel[:300], "guid": guid[:300]}
     return diag
+
+
+def _diagnostic_signature(reason, diagnostic):
+    """Group repeated parser failures without endpoint-specific values in the key."""
+    selected = diagnostic.get("selected_candidate", {})
+    candidates = diagnostic.get("normalized_candidates", {})
+    compatibility = diagnostic.get("compatibility", {})
+    compact = {
+        "reason": str(reason),
+        "adapters": compatibility.get("adapters", []),
+        "adapter_unsupported_reason": compatibility.get("unsupported_reason", ""),
+        "selected": {
+            "requested_key": selected.get("requested_key", ""),
+            "type": selected.get("type", ""),
+            "cleaned": selected.get("cleaned", ""),
+        },
+        "generic_id": (candidates.get("id") or {}).get("cleaned", ""),
+        "task": (candidates.get("task") or {}).get("cleaned", ""),
+    }
+    return json.dumps(compact, sort_keys=True, separators=(",", ":")), compact
+
+
+def _record_diagnostic_group(report, lookup, row_number, row, reason, maximum_groups=50):
+    diagnostic = malformed_diagnostic(row, reason)
+    key, signature = _diagnostic_signature(reason, diagnostic)
+    group = lookup.get(key)
+    pointer = diagnostic.get("splunk_pointer", {})
+    if group is not None:
+        group["count"] += 1
+        if len(group["sample_rows"]) < 3:
+            group["sample_rows"].append(row_number)
+        if pointer and len(group["sample_pointers"]) < 3:
+            group["sample_pointers"].append(pointer)
+        return
+    if len(report["diagnostic_groups"]) >= maximum_groups:
+        report["diagnostic_groups_omitted"] = report.get("diagnostic_groups_omitted", 0) + 1
+        return
+    group = {
+        "count": 1,
+        "reason": str(reason),
+        "signature": signature,
+        "sample_rows": [row_number],
+        "sample_pointers": [pointer] if pointer else [],
+        "sample": diagnostic,
+    }
+    report["diagnostic_groups"].append(group)
+    lookup[key] = group
 
 
 def peer_certificate(response):
@@ -436,9 +488,10 @@ class SplunkClient:
             if count >= cfg.max_events:
                 raise TooManyEvents("Slice exceeds result cap")
             events, report = [], {"received": count, "invalid": 0, "ignored": 0,
-                                  "filtered_by_computer": 0, "errors": [],
+                                  "filtered_by_computer": 0, "diagnostic_groups": [],
                                   "index_time_start": start, "index_time_end": end,
                                   "malformed_tolerance": cfg.malformed_tolerance}
+            diagnostic_lookup = {}
             offset = 0
             while offset < count:
                 if time.monotonic() >= deadline:
@@ -461,23 +514,25 @@ class SplunkClient:
                         report["ignored"] += 1
                     except InvalidEvent as exc:
                         report["invalid"] += 1
-                        if len(report["errors"]) < 20:
-                            report["errors"].append({"row": offset + index + 1, "reason": str(exc),
-                                "diagnostic": malformed_diagnostic(row, exc)})
+                        _record_diagnostic_group(report, diagnostic_lookup,
+                            offset + index + 1, row, exc)
                 offset += len(records)
             if report["invalid"] > cfg.malformed_tolerance:
                 report["diagnostic_note"] = (
-                    "Detailed parser diagnostics for the first 20 malformed records are retained in this failed job. "
-                    "The full _raw event and CommandLine are not stored; use the Splunk pointer and raw SHA-256 to locate a record if needed.")
+                    "Malformed records are grouped by parser-failure signature (up to 50 groups), with counts and up to "
+                    "three Splunk pointers per group. The full _raw event and CommandLine are not stored; use a pointer "
+                    "and raw SHA-256 from the group sample to locate a record if needed.")
+                first_reason = (report["diagnostic_groups"][0]["reason"]
+                                if report["diagnostic_groups"] else "unknown parser error")
                 raise SplunkError(
                     f"{report['invalid']} malformed supported events in slice; tolerance={cfg.malformed_tolerance}. "
-                    f"First error: {report['errors'][0]['reason']}. Detailed diagnostics are in the failed job Result. "
+                    f"First error group: {first_reason}. Grouped diagnostics are in the failed job Result. "
                     "Checkpoint not advanced",
                     report=report)
             if report["invalid"]:
                 report["tolerated_malformed"] = report["invalid"]
                 report["warning"] = (f"Skipped {report['invalid']} malformed event(s) under the configured "
-                    "pilot tolerance; checkpoint advanced. Review errors before production use.")
+                    "pilot tolerance; checkpoint advanced. Review diagnostic_groups before production use.")
             return events, report
         finally:
             try:
