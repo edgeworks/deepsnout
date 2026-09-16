@@ -53,18 +53,27 @@ For the flat Cribl adapter specifically:
 - provider/channel/provider GUID must independently identify Sysmon before Sysmon
   compatibility semantics are applied;
 - supported symbolic IDs (`PROCESS_CREATE`, `NETWORK_CONNECT`, `DNS_QUERY`) may be
-  translated to Event IDs 1, 3 and 22;
-- other trusted symbolic/numeric Sysmon IDs are classified as unsupported, so an
-  `IMAGE_LOAD` record is ignored rather than reported malformed;
-- when `ID` is absent, `Task` is only a compatibility hint for Event 1, 3 or 22 and
-  is accepted only when event-specific payload fields corroborate that type (for
-  example DestinationIp/DestinationPort for Event 3 or QueryName for Event 22);
-- every successful Task/symbolic-ID inference adds a normalization warning.
+  translated to Event IDs 1, 3 and 22 only when the payload shape corroborates
+  the event type;
+- recognized unsupported symbolic IDs such as `IMAGE_LOAD` are counted as ignored;
+  unknown symbolic IDs remain malformed so a new upstream dialect is not hidden;
+- when `ID` is absent, `Task` is only a compatibility hint. Tasks 1, 3 and 22 are
+  accepted only when event-specific payload fields corroborate the supported type;
+- observed unsupported Task values are also ignored only when both the Task value
+  and an event-family payload signature match. The pilot currently has verified
+  signatures for Tasks 2, 4, 5, 6, 7, 8, 11, 12, 13 and 15;
+- an unknown Task, or a known Task whose payload no longer matches the verified
+  signature, remains malformed and blocks the checkpoint unless an explicit pilot
+  tolerance permits it;
+- every successful supported Task/symbolic-ID inference adds a normalization warning.
 
-This deliberately avoids generalizing an unusual Cribl serialization into the
-cross-environment parser contract. If that upstream format changes, the adapter
-can fail visibly or be revised without changing XML, canonical JSON or another
-vendor's `Id` semantics.
+This deliberately avoids claiming that Windows `Task` is universally equivalent
+to Sysmon EventID. In the observed Cribl stream many Task values line up with the
+corresponding Sysmon event family, while earlier samples also showed alternate
+serialization behavior. The adapter therefore requires corroborating fields and
+keeps these rules outside the cross-environment parser contract. If the upstream
+format changes, the adapter can fail visibly or be revised without changing XML,
+canonical JSON or another vendor's `Id` semantics.
 
 If the selected Splunk sourcetype contains a mixed Windows Event Log stream, the
 flat-system adapter preserves top-level `Name` as the provider. Non-Sysmon
