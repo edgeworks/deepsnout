@@ -37,6 +37,19 @@ def test_remote_failure_does_not_advance(engine,config):
         assert db.get(Source,sid).checkpoint==CLOCK-600 and count(db,Seen)==0 and db.get(Job,jid).status=='failed'
 
 
+def test_parser_failure_report_is_persisted(engine,config):
+    sid,jid=source_job(engine,config)
+    diagnostic={'invalid':42,'errors':[{'row':7,'reason':'Invalid event id','diagnostic':{'selected_candidate':{'cleaned':'bad'}}}]}
+    class Broken(Client):
+        def slice(self,*_): raise SplunkError('Detailed diagnostics are in the failed job Result',report=diagnostic)
+    assert not run_job(engine,config,jid,client_factory=Broken)
+    with transaction(engine) as db:
+        job=db.get(Job,jid)
+        assert job.status=='failed' and job.report==diagnostic
+        assert db.get(Source,sid).checkpoint==CLOCK-600
+        assert db.get(Source,sid).last_error.startswith('Detailed diagnostics')
+
+
 def test_capacity_failure_does_not_advance(engine,config):
     sid,jid=source_job(engine,config)
     with transaction(engine) as db:
