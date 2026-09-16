@@ -93,8 +93,12 @@ _SYMBOLIC_SUPPORTED = {
 
 # Only names actually observed/verified in this compatibility dialect belong
 # here. Unknown symbolic IDs remain malformed instead of being silently ignored.
+# An expected Task may be supplied where the symbolic ID is an Event 255 error
+# subtype rather than a normal Sysmon event-family name.
 _SYMBOLIC_UNSUPPORTED = {
-    "IMAGE_LOAD": "image-load",
+    "IMAGE_LOAD": ("image-load", None),
+    "QUEUE": ("sysmon-error-queue", 255),
+    "GETCONFIGURATIONOPTIONS": ("sysmon-error-get-configuration-options", 255),
 }
 
 # These are not a global claim that Windows Task == Sysmon EventID. They describe
@@ -113,6 +117,7 @@ _UNSUPPORTED_TASK_SIGNATURES = {
     12: ("registry-object-create-delete", ("ProcessGuid", "TargetObject", "EventType")),
     13: ("registry-value-set", ("ProcessGuid", "TargetObject", "EventType", "Details")),
     15: ("file-create-stream-hash", ("ProcessGuid", "TargetFilename", "Hash", "Contents")),
+    16: ("sysmon-configuration-change", ("Configuration", "ConfigurationFileHash")),
 }
 
 
@@ -157,7 +162,8 @@ def _cribl_flat_sysmon(event):
     Sysmon identity. Generic ``ID`` and Windows ``Task`` remain compatibility
     hints, not core EventID aliases. Supported hints need event-specific payload
     corroboration; unsupported Task values are ignored only for verified payload
-    signatures observed in this dialect.
+    signatures observed in this dialect. Verified Event-255 symbolic error IDs
+    additionally require Task=255.
     """
     if not _flat_windows_shape(event) or not _trusted_sysmon(event):
         return None
@@ -165,6 +171,12 @@ def _cribl_flat_sysmon(event):
     fields = {}
     warnings = []
     detail = {}
+    task_text = _scalar_text(event.get("Task", ""))
+    try:
+        task = int(task_text)
+    except (TypeError, ValueError):
+        task = None
+
     raw_symbol = _scalar_text(event.get("ID", ""))
     symbolic = _symbol(raw_symbol) if raw_symbol else ""
     if symbolic:
@@ -177,14 +189,18 @@ def _cribl_flat_sysmon(event):
             else:
                 detail["symbolic_signature_mismatch"] = symbolic
         elif symbolic in _SYMBOLIC_UNSUPPORTED:
-            return AdapterContribution(
-                "cribl-flat-sysmon",
-                fields=fields,
-                warnings=tuple(warnings),
-                unsupported_reason=("Recognized unsupported flat Sysmon shape from cribl-flat-sysmon adapter: "
-                                    f"{_SYMBOLIC_UNSUPPORTED[symbolic]} (ID={symbolic})"),
-                detail=detail,
-            )
+            label, expected_task = _SYMBOLIC_UNSUPPORTED[symbolic]
+            if expected_task is None or task == expected_task:
+                return AdapterContribution(
+                    "cribl-flat-sysmon",
+                    fields=fields,
+                    warnings=tuple(warnings),
+                    unsupported_reason=("Recognized unsupported flat Sysmon shape from cribl-flat-sysmon adapter: "
+                                        f"{label} (ID={symbolic}" +
+                                        (f", Task={task}" if expected_task is not None else "") + ")"),
+                    detail=detail,
+                )
+            detail["symbolic_task_mismatch"] = f"expected {expected_task}, got {task_text or '<missing>'}"
         elif raw_symbol.isdigit():
             numeric = int(raw_symbol)
             if numeric in SUPPORTED_EVENT_IDS and _supported_signature_matches(event, numeric):
@@ -204,12 +220,7 @@ def _cribl_flat_sysmon(event):
     # Explicit/nested EventID extraction in the core takes precedence over this
     # compatibility hint because adapter fields are merged with setdefault().
     if "EventID" not in fields and not symbolic:
-        task_text = _scalar_text(event.get("Task", ""))
         detail["task"] = task_text
-        try:
-            task = int(task_text)
-        except (TypeError, ValueError):
-            task = None
         if task in SUPPORTED_EVENT_IDS:
             if _supported_signature_matches(event, task):
                 fields["EventID"] = str(task)
