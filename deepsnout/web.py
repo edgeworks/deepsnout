@@ -25,6 +25,9 @@ from .splunk import SplunkSettings, validate_url
 from .worker import enqueue
 from .engine import EXPECTABLE
 from .features import psl_available
+from .peer_groups import (suggestion_state, peer_group_catalog, approve_suggestion,
+                          reject_suggestion, create_manual_group, assign_host_group,
+                          group_options as peer_group_options, group_detail)
 
 BASE = Path(__file__).parent
 
@@ -334,18 +337,82 @@ def create_app(config=None):
             coverage=db.execute(select(Coverage.event_id,func.count().label("days"),
                 func.sum(Coverage.count).label("count")).where(Coverage.host_id==host_id).group_by(Coverage.event_id)).all()
             findings=db.scalars(select(Finding).where(Finding.host_id==host_id).order_by(Finding.last_seen.desc()).limit(50)).all()
-            return view(request,"endpoint.html",user=user,host=host,coverage=coverage,findings=findings)
+            return view(request,"endpoint.html",user=user,host=host,coverage=coverage,findings=findings,
+                        group_options=peer_group_options(db))
 
     @app.post("/endpoints/{host_id}/cohort")
     async def cohort(request: Request,host_id: str):
         form=await form_data(request); value=str(form.get("cohort","")).strip().lower()
-        if not re.fullmatch(r"[a-z0-9_-]{1,80}",value):
-            raise ValueError("Use a short cohort name containing letters, numbers, - or _")
         with transaction(engine) as db:
             user=login_user(request,db,{"admin","analyst"})
-            found(db,Host,host_id).cohort=value
-            audit(db,user.username,"endpoint.cohort",host_id,value)
+            host=found(db,Host,host_id)
+            assign_host_group(db,host,value)
+            audit(db,user.username,"endpoint.peer_group",host_id,value)
         return RedirectResponse("/endpoints/"+host_id,303)
+
+    @app.get("/peer-groups")
+    def peer_groups_page(request: Request):
+        with transaction(engine) as db:
+            user=login_user(request,db)
+            suggestions=suggestion_state(db)
+            catalog=peer_group_catalog(db)
+            approved=[]
+            for label,item in sorted(catalog.items()):
+                approved.append({"label":label,"kind":item.get("kind","manual"),
+                    "maturity":item.get("maturity","manual"),
+                    "count":db.scalar(select(func.count()).select_from(Host).where(Host.cohort==label)) or 0})
+            return view(request,"peer_groups.html",user=user,suggestions=suggestions,approved=approved)
+
+    @app.post("/peer-groups/refresh")
+    async def peer_groups_refresh(request: Request):
+        await form_data(request)
+        with transaction(engine) as db:
+            user=login_user(request,db,{"admin","analyst"})
+            job=enqueue(db,"peer_groups")
+            audit(db,user.username,"peer_groups.refresh",job.id)
+            destination="/jobs/"+job.id if user.role=="admin" else "/peer-groups"
+        return RedirectResponse(destination,303)
+
+    @app.post("/peer-groups/manual")
+    async def peer_group_manual(request: Request):
+        form=await form_data(request)
+        with transaction(engine) as db:
+            user=login_user(request,db,{"admin","analyst"})
+            label=create_manual_group(db,str(form.get("label","")),user.username)
+            audit(db,user.username,"peer_group.manual_created",label)
+        return RedirectResponse("/peer-groups",303)
+
+    @app.post("/peer-groups/{group_id}/approve")
+    async def peer_group_approve(request: Request,group_id: str):
+        form=await form_data(request)
+        with transaction(engine) as db:
+            user=login_user(request,db,{"admin","analyst"})
+            label=approve_suggestion(db,group_id,str(form.get("label","")),user.username)
+            audit(db,user.username,"peer_group.approved",label,group_id)
+        return RedirectResponse("/peer-groups/"+label,303)
+
+    @app.post("/peer-groups/{group_id}/reject")
+    async def peer_group_reject(request: Request,group_id: str):
+        await form_data(request)
+        with transaction(engine) as db:
+            user=login_user(request,db,{"admin","analyst"})
+            reject_suggestion(db,group_id)
+            audit(db,user.username,"peer_group.rejected",group_id)
+        return RedirectResponse("/peer-groups",303)
+
+    @app.get("/peer-groups/{identifier}")
+    def peer_group_page(request: Request,identifier: str,q: str=""):
+        with transaction(engine) as db:
+            user=login_user(request,db)
+            group=group_detail(db,identifier)
+            if not group:
+                raise HTTPException(404,"Peer group not found")
+            ids=group.get("members",[])
+            query=select(Host).where(Host.id.in_(ids)) if ids else select(Host).where(Host.id=="__none__")
+            if q:
+                query=query.where(Host.name.ilike("%"+q[:100]+"%"))
+            members=db.scalars(query.order_by(Host.name).limit(500)).all()
+            return view(request,"peer_group.html",user=user,group=group,members=members,q=q)
 
     @app.get("/sources")
     def sources(request: Request,edit: str=""):
