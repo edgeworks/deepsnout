@@ -99,38 +99,94 @@ policy and verify its fingerprint over a trusted channel. **Never copy the CA pr
 key from the Caddy data volume.** It can issue certificates trusted by any workstation
 that trusts this root.
 
-The setup token is a one-time bootstrap secret stored under the application data
-volume. Complete setup promptly, then treat the data volume as sensitive.
+Paste the one-time setup token and create the first administrator. There is no
+shared/default password. Try **Import & demo -> Load synthetic demo**, inspect its
+job report, then open the investigation inbox.
 
-For headless systems behind an outbound build proxy, pass the proxy only to the
-build that needs it rather than baking credentials into an image. For example:
+Next configure a limited real connection under **Sources**, test, poll once, and
+inspect the result before enabling scheduling. [Splunk guide](docs/splunk.md).
+
+Compose provides Caddy, PostgreSQL, two Python services (web and analysis worker),
+and two one-shot initialization jobs. Only Caddy publishes host ports (80/443;
+443/UDP enables HTTP/3). Secrets, DB state and Caddy PKI state persist in named
+volumes; `docker compose down` retains them. **`docker compose down -v` destroys
+them.** The initial image build downloads packages/images; local analysis does not
+require external connectivity after deployment. The operator-configured Splunk
+connection is the intentional network dependency for collection.
+
+If your network requires an outbound proxy while building images, configure the
+Docker daemon/builder or preserve the proxy environment and pass standard proxy
+build arguments. Do not bake proxy credentials into the Dockerfiles.
+
+## Why this architecture?
+
+Python/FastAPI and Jinja keep the code approachable without a frontend build
+system. PostgreSQL provides transactions, durable jobs and checkpoints without
+adding Redis/Celery/Kafka. Caddy owns the browser-facing TLS protocol and local PKI
+instead of teaching the application server to manage certificates. One analysis
+writer makes ordering explicit. SQLite supports local development/tests;
+**PostgreSQL is the deployment target**.
+
+Full commands are inspected transiently and replaced by flags; original source
+references remain available. There is no permanent raw-event archive. Read
+[the data model, privacy and limits](docs/design.md).
+
+## Initial detectors
+
+| Detector | Investigation question |
+| --- | --- |
+| DS-EXEC-001 | Why does this scripting-capable process combine a remote reference with an execution primitive? |
+| DS-EXEC-002 | Why is a new launch context making an attributable outbound connection? |
+| DS-NET-001 | Why did this application's destination diversity exceed its prior range for two consecutive windows? |
+
+A rare domain, changing software hash or sparse history alone does not create a
+review card. Common software is not automatically trusted. Open findings do not
+vanish because activity becomes common. [Precise detector semantics](docs/detectors.md).
+
+## Development
+
+Python 3.12+ on Linux/macOS; the application container uses Python 3.13:
 
 ```sh
-export HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}"
-export HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
-export NO_PROXY="${NO_PROXY:-${no_proxy:-}}"
-
-sudo --preserve-env=HTTP_PROXY,HTTPS_PROXY,NO_PROXY \
-  docker compose --progress=plain build \
-    --build-arg HTTP_PROXY \
-    --build-arg HTTPS_PROXY \
-    --build-arg NO_PROXY
-sudo docker compose up --no-build -d
+python -m venv .venv
+. .venv/bin/activate
+pip install -e '.[test]'
+python -m pytest
+# Terminal 1: local SQLite HTTP development only
+python -m deepsnout.cli serve
+# Terminal 2
+python -m deepsnout.cli worker
+python -m deepsnout.cli setup-token
 ```
 
-Configure the Splunk source from **Sources**, test the connection, then enable it.
-DeepSnout deliberately does not receive Universal Forwarder/S2S traffic directly.
+The direct development server is intentionally separate from the Compose deployment;
+Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
+the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
+not certification against your deployment.
 
-## Documentation
+## Deliberate boundaries
 
-- [Product brief](docs/product-brief.md)
-- [Design](docs/design.md)
-- [Detectors](docs/detectors.md)
-- [Peer groups](docs/peer-groups.md)
-- [Splunk source](docs/splunk.md)
-- [Deployment](docs/deployment.md)
-- [Enrichment policy](docs/enrichment-policy.md)
-- [Testing/verification](docs/testing.md)
-- [Publishing](docs/publishing.md)
+No SSO/MFA, automated remediation, long-term exact IOC inventory, alert email
+engine, trained ML model, automatic offline update bundle or GUI disaster-recovery
+restore. Automatic peer grouping is similarity discovery rather than a learned
+classifier; its first version deliberately leaves full drift/prototype protection
+as a follow-up. Observed history is not necessarily benign. Missing joins, limited
+history, retention, cardinality and source lag remain important limitations. No
+3,000-endpoint throughput claim is made.
 
-See `SECURITY.md` before exposing a pilot beyond a trusted management network.
+The bundled Caddy mode currently uses DeepSnout's local CA. GUI upload/activation of
+an organization certificate and automated public/internal ACME are **not implemented
+yet**; those will be added without making the FastAPI service own the TLS private
+key. See [deployment](docs/deployment.md).
+
+Future enrichment stays optional and entitlement-aware. A possible VirusTotal
+adapter uses **one configured account**, deduplication, cache, explicit budgets,
+pacing and backoff. It never rotates accounts to evade limits or markets a free
+license workaround. Provider terms and any operator agreement must permit the
+actual use: respecting a rate limit is not permission. See
+[enrichment policy](docs/enrichment-policy.md).
+
+Project code is [MIT licensed](LICENSE). Dependency licenses remain their own.
+The offline Public Suffix List comes from system `libpsl`; availability/fallback
+is shown in Operations. [Contributing](CONTRIBUTING.md) | [Security](SECURITY.md) |
+[Product brief](docs/product-brief.md) | [Peer groups](docs/peer-groups.md).
