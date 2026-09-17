@@ -1,8 +1,8 @@
-# Verification report - 0.1.0a9
+# Verification report - 0.1.0a10
 
 ## Automated verification
 
-The 0.1.0a9 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a10 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.
@@ -28,6 +28,15 @@ capacities, retention, Splunk source pagination/failure rollback, source TLS-pin
 configuration/fingerprint extraction, role/CSRF controls, command privacy,
 settings, account recovery, secret separation and GUI routes/decisions.
 
+Automatic peer-group tests now exercise immediate same-day provisional discovery,
+explainable feature vectors, approval and automatic membership, rejection-memory
+fingerprints, manual groups and the safety transition from provisional
+non-suppressive peer evidence to stable suppressive peer evidence after sufficient
+completed-day history. GUI coverage includes the Peer Groups page, creation of a
+manual group, managed endpoint assignment and viewer write restrictions. These are
+synthetic grouping fixtures, not a claim that the current clustering thresholds are
+validated for arbitrary enterprise fleets.
+
 Environment-specific JSON semantics are exercised separately through the built-in
 compatibility-adapter seam. Regressions cover the observed flat Cribl
 `sourceMachineID`/`Name`/`Guid`/`Task` shape, trusted-provider/GUID detection,
@@ -35,13 +44,14 @@ Event 1/3/22 Task hints only when the corresponding payload signature corroborat
 the type, supported symbolic IDs, and the observed unsupported Sysmon families
 represented by Tasks 2, 4, 5, 6, 7, 8, 11, 12, 13, 15 and 16. Those unsupported
 families are counted as ignored only when their event-specific payload signature
-also matches. Known Tasks with incomplete/mismatched fields, unknown Tasks and
-unknown symbolic IDs remain malformed. `ID=IMAGE_LOAD` is a separately verified
-unsupported symbolic case. The observed Event-255 error subtypes `ID=QUEUE` and
-`ID=GetConfigurationOptions` are ignored only when `Task=255`; a different Task
-remains malformed. A flat non-Sysmon Windows provider in a mixed sourcetype
-remains ignored rather than being interpreted with Sysmon rules. The core parser
-does not treat generic `ID`/`id` or `Task` as EventID.
+also matches. Known Tasks with incomplete/mismatched fields and unknown Tasks remain
+malformed. `ID=IMAGE_LOAD` is a separately verified unsupported symbolic case.
+Trusted flat Sysmon records with `Task=255` and a symbolic error subtype are treated
+as unsupported when they do not look like a supported Event 1/3/22 payload; negative
+tests prevent a Task-255 symbol from masking a supported-looking payload. A flat
+non-Sysmon Windows provider in a mixed sourcetype remains ignored rather than being
+interpreted with Sysmon rules. The core parser does not treat generic `ID`/`id` or
+`Task` as EventID.
 
 Splunk malformed-event diagnostics are regression-tested as grouped failure
 signatures rather than only the first 20 records. Repeated failures are counted,
@@ -94,8 +104,9 @@ firewall, DNS, proxy, TLS inspection or browser policy.
 `tools/benchmark.py` records one short SQLite ingestion run for 5,000 synthetic
 records across 100 host identities. No production-shaped benchmark is claimed.
 This excludes actual Splunk retrieval, PostgreSQL history, new-process-heavy
-workloads, concurrent users and sustained load. It is NOT a capacity estimate for
-2,000-3,000 endpoints. State cardinality and retention need an actual pilot.
+workloads, concurrent users, peer-group discovery and sustained load. It is NOT a
+capacity estimate for 2,000-3,000 endpoints. State cardinality and retention need
+an actual pilot.
 
 ## Remaining acceptance gates
 
@@ -109,7 +120,8 @@ In a controlled operator environment:
 - for Cribl-transformed input, inspect real Event 1, 3 and 22 payloads and confirm
   Computer/MachineName/sourceMachineID, original timestamp, ProcessGuid and required
   network/DNS fields;
-- start with one endpoint using the GUI Computer selection pattern;
+- review automatic Peer Groups against actual organizational roles, especially
+  early/provisional groups, and measure grouping runtime at real fleet size;
 - assess findings against reviewed known/normal examples;
 - measure storage, queue growth and ingestion lag;
 - validate backup and restore of database, app secrets and Caddy CA identity;
