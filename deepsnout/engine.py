@@ -11,6 +11,7 @@ from .db import (Host, Coverage, Seen, BatchReceipt, Process, BehaviorDay, Windo
                  Finding, Expectation, Job, Audit, LoginSession, policy, now, set_state)
 from .normalize import digest, VERSION
 from .features import Diversity, service_group
+from .peer_groups import peer_group_suppression_allowed
 
 DAY = 86400
 WINDOW = 1800
@@ -46,6 +47,7 @@ def reference(db, host, context, app, ts, cfg):
         BehaviorDay.host_id == host.id, BehaviorDay.context == context,
         BehaviorDay.day >= since, BehaviorDay.day < day)) or 0
     eligible, seen = 0, 0
+    suppressive = False
     if host.cohort != "unassigned":
         qualified = select(BehaviorDay.host_id).where(BehaviorDay.app == app,
             BehaviorDay.day >= since, BehaviorDay.day < day).group_by(BehaviorDay.host_id).having(
@@ -58,9 +60,13 @@ def reference(db, host, context, app, ts, cfg):
         seen = db.scalar(select(func.count(func.distinct(Host.id))).join(
             BehaviorDay, BehaviorDay.host_id == Host.id).where(
             *shared, BehaviorDay.context == context)) or 0
+        suppressive = peer_group_suppression_allowed(db, host.cohort)
     return {"prior_observed_days": observed, "prior_context_days": familiar,
             "local_new": familiar == 0, "peer_seen": seen, "peer_eligible": eligible,
-            "peer_qualified": eligible >= cfg.minimum_peer_hosts, "cohort": host.cohort,
+            "peer_evidence_available": eligible > 0,
+            "peer_group_suppression_allowed": suppressive,
+            "peer_qualified": suppressive and eligible >= cfg.minimum_peer_hosts,
+            "cohort": host.cohort,
             "reference_days": cfg.baseline_days, "reference_before": day * DAY,
             "confidence": "established" if observed >= cfg.minimum_days else "learning"}
 
