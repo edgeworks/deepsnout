@@ -29,7 +29,7 @@ def post(browser,path,**data):
     return browser.post(path,data={'csrf':browser.cookies['ds_csrf'],**data})
 
 
-@pytest.mark.parametrize('path',['/','/discover','/endpoints','/expectations','/sources',
+@pytest.mark.parametrize('path',['/','/discover','/endpoints','/peer-groups','/expectations','/sources',
     '/imports','/operations','/settings','/accounts','/help','/healthz','/api/status'])
 def test_pages(browser,path):
     r=browser.get(path)
@@ -64,7 +64,9 @@ def test_real_demo_finding_lifecycle(browser,engine,config):
     with transaction(engine) as db:
         host=db.scalar(select(Host)); hid=host.id
     assert browser.get('/endpoints/'+hid).status_code==200
+    assert post(browser,'/peer-groups/manual',label='office').status_code==303
     assert post(browser,'/endpoints/'+hid+'/cohort',cohort='office').status_code==303
+    assert browser.get('/peer-groups/office').status_code==200
 
 
 def test_import_drops_command_secrets(browser,engine,config):
@@ -99,6 +101,7 @@ def test_viewer_cannot_write(browser,engine):
     post(browser,'/logout'); browser.get('/login')
     assert post(browser,'/login',username='viewer',password='Viewer test passphrase').status_code==303
     assert browser.get('/sources').status_code==403 and post(browser,'/demo').status_code==403
+    assert post(browser,'/peer-groups/manual',label='forbidden').status_code==403
     assert browser.get('/').status_code==200
 
 
