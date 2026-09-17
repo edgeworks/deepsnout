@@ -8,6 +8,7 @@ from .db import (transaction, Source, Job, State, Host, Coverage, Process, Behav
                  Window, Finding, Expectation, BatchReceipt, Seen, now, set_state, audit)
 from .normalize import Event, digest
 from .engine import ingest, evaluate_windows, maintenance
+from .peer_groups import refresh_peer_groups
 from .splunk import SplunkClient, SplunkSettings
 from .security import crypto
 from .demo import fixtures
@@ -21,6 +22,10 @@ def enqueue(db, kind, payload=None, source_id=None):
         raise ValueError("Queue contains 20 pending jobs. Wait for the worker or inspect Operations")
     if source_id:
         existing = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+        if existing:
+            return existing
+    if kind == "peer_groups":
+        existing = db.scalar(select(Job).where(Job.kind == kind, Job.status.in_(["queued", "running"])))
         if existing:
             return existing
     job = Job(kind=kind, source_id=source_id, payload=payload or {})
@@ -91,7 +96,7 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             records = fixtures(now())
             payload["namespace"] = "demo"
             payload["batch_id"] = digest("demo", int(now()) // 86400)
-        elif kind not in {"maintenance", "remove_demo"}:
+        elif kind not in {"maintenance", "remove_demo", "peer_groups"}:
             raise ValueError("Unknown job kind")
         guard()
         with transaction(engine) as db:
@@ -106,6 +111,8 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     batch_id=payload.get("batch_id"),
                     cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned")}
                 evaluate_windows(db)
+            if kind == "peer_groups":
+                result = refresh_peer_groups(db)
             if kind == "remove_demo":
                 ids = select(Host.id).where(Host.namespace == "demo")
                 count = db.scalar(select(func.count()).select_from(Host).where(Host.namespace == "demo"))
@@ -155,6 +162,10 @@ def tick(engine, config, guard=lambda: None):
                     break
                 enqueue(db, "poll", source_id=source.id)
                 source.last_poll = now()
+        peer_state = db.get(State, "peer_group_suggestions")
+        peer_updated = peer_state.value.get("updated_at", 0) if peer_state else 0
+        if db.scalar(select(func.count()).select_from(Host)) and now() - peer_updated >= 3600:
+            enqueue(db, "peer_groups")
         job = db.scalar(select(Job).where(Job.status == "queued").order_by(Job.created).limit(1))
         job_id = job.id if job else None
     if job_id:
