@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a10, initial runnable pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a11, initial runnable pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -31,14 +31,15 @@ limited source and known examples. See [the exact verification boundary](docs/te
   destination-diversity changes. Findings have deterministic explanations.
 - Explainable **automatic peer-group discovery** from bounded behavioral summaries.
   Suggestions begin as soon as useful endpoint observations exist rather than
-  waiting for a 28-day baseline. Application prevalence, parent-child process
-  relationships, path classes and coarse application network activity form sparse
-  similarity profiles; fleet-common and singleton features are reduced or excluded.
-  Analysts can approve/rename or reject suggestions, create manual groups and
-  inspect/search group members. Rejected group fingerprints are remembered.
-  Provisional automatic groups expose peer evidence but cannot suppress
-  DS-EXEC-002; only approved mature automatic groups, or explicit manual groups,
-  may provide suppressive peer-common evidence. See [Peer groups](docs/peer-groups.md).
+  waiting for a 28-day baseline. The v2 layer compares broad application footprints,
+  recurring application combinations, parent-child process ecology, application
+  network roles and coarse activity patterns separately. Windows/platform signals
+  are retained for technical-cluster discovery but do not make a group suitable for
+  detector suppression. Narrow clusters such as a shared image or one product remain
+  visible and are labelled technical; only analyst-approved, mature `recommended`
+  automatic groups (or explicit manual groups) may provide suppressive peer-common
+  evidence to DS-EXEC-002. Correlated app/parent/network signals are collapsed in
+  explanations. See [Peer groups](docs/peer-groups.md).
 - Prior-day references, qualified application peers, bounded evidence,
   temporary process metadata and fixed-size approximate diversity summaries.
 - Investigation inbox, endpoint/discovery views, evidence export, decisions,
@@ -168,11 +169,13 @@ not certification against your deployment.
 
 No SSO/MFA, automated remediation, long-term exact IOC inventory, alert email
 engine, trained ML model, automatic offline update bundle or GUI disaster-recovery
-restore. Automatic peer grouping is similarity discovery rather than a learned
-classifier; its first version deliberately leaves full drift/prototype protection
-as a follow-up. Observed history is not necessarily benign. Missing joins, limited
-history, retention, cardinality and source lag remain important limitations. No
-3,000-endpoint throughput claim is made.
+restore. Automatic peer grouping is deterministic similarity discovery rather than
+a learned classifier. Executable basenames are not product identities, so suites
+with several helper processes can still appear broader than they really are; full
+prototype/membership drift protection remains a focused follow-up. Observed history
+is not necessarily benign. Missing joins, limited history, retention, cardinality
+and source lag remain important limitations. No 3,000-endpoint throughput claim is
+made.
 
 The bundled Caddy mode currently uses DeepSnout's local CA. GUI upload/activation of
 an organization certificate and automated public/internal ACME are **not implemented
