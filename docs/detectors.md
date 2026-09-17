@@ -21,11 +21,21 @@ new execution context, and an initiated external connection from the SAME endpoi
 and ProcessGuid at/after creation. Supporting characteristic: temporary/download/
 user-profile/share path class, Office/browser parent, or encoded argument flag.
 
-When enough application peers qualify, the context must be below the configurable
-common-peer fraction (default 10%). Sparse peers fall back to established local
-history and show the missing assurance. Known hashes are not automatically trusted.
-Missing GUIDs, proxy representations, absent create events and basename/path
-ambiguity reduce capability. One new approved utility may still require a decision.
+Peer grouping augments the established local baseline rather than replacing it.
+DeepSnout can discover explainable automatic peer groups immediately from available
+behavioral summaries; suggestions have no detector effect until approved. Approved
+provisional/growing automatic groups may expose `peer_seen`/`peer_eligible` evidence,
+but cannot suppress a DS-EXEC-002 finding. Only a stable approved automatic group
+(at least seven median observed days, no current partial day in the discovery run),
+or an explicit manual group, may make peer-common behavior suppressive.
+
+When a suppression-eligible group has enough application peers (default minimum 10),
+the context must be below the configurable common-peer fraction (default 10%).
+Sparse/non-suppressive peers fall back to established local history and show the
+missing assurance. Known hashes are not automatically trusted. Missing GUIDs, proxy
+representations, absent create events and basename/path ambiguity reduce capability.
+One new approved utility may still require a decision. See `docs/peer-groups.md` for
+peer discovery and maturity semantics.
 
 ## DS-NET-001
 
