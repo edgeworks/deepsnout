@@ -11,7 +11,7 @@ It does not wait for a full 28-day history. If the environment has no completed
 observation day yet, the current partial day may be used for **suggestion generation
 only** and the GUI shows an early-grouping warning.
 
-Automatic groups have three simple maturity states:
+Automatic groups have three maturity states:
 
 - **provisional**: current-day data was needed, or the median member has fewer than
   three observed days;
@@ -25,43 +25,91 @@ intermittently used endpoints can still accumulate useful evidence.
 
 A suggestion has no effect on detectors. After approval, provisional/growing groups
 may expose peer counts in DS-EXEC-002 evidence, but **peer-common behavior cannot
-suppress a finding until an automatic group is stable**. Manual groups are explicit
-analyst intent and use the existing minimum-peer rule immediately.
+suppress a finding until an automatic group is stable and peer-suitable**. Manual
+groups are explicit analyst intent and use the existing minimum-peer rule immediately.
 
-## Current similarity features
+## Two kinds of discovered groups
 
-The first algorithm uses bounded summaries already held by DeepSnout; it does not
-retain raw events for clustering. Per-host sparse vectors include:
+The v2 discovery layer distinguishes **recommended peer groups** from **technical
+clusters**.
 
-- application presence/prevalence over observed days;
-- parent -> child application relationships;
-- application + normalized path/location class;
-- whether an application has IP or DNS activity.
+A technical cluster can be real and useful even when it is not a business/behavioral
+peer population. Examples include endpoints sharing a new Windows image, a scanner
+suite, a Defender configuration or another narrow product footprint. These clusters
+remain visible for analyst context, but approving/tracking one never makes it eligible
+to suppress DS-EXEC-002.
 
-Exact destination IPs/domains, usernames and file hashes are not peer-group
-features. Singleton features are excluded, very fleet-common features are reduced
-or excluded, and the remaining features receive inverse-fleet-frequency weighting.
-This keeps ubiquitous Windows activity from dominating similarity and reduces the
-chance that one new/rare executable becomes a group definition.
+A recommended peer group must show broader agreement. In particular, platform-only
+similarity cannot establish detector peers, and one rare executable is not enough.
+The group must have a sufficiently similar non-Windows application footprint plus
+support from another behavioral view.
 
-The implementation keeps each host's highest-weight bounded feature set, generates
-candidate pairs through an inverted feature index, applies cosine similarity, then
-forms connected similarity components. Groups need at least three members and a
-minimum cohesion. This is deterministic unsupervised similarity grouping, not a
-trained classifier or probability model.
+## Multi-channel host profiles
 
-## Explanations
+Discovery uses bounded summaries already stored by DeepSnout. It does not retain raw
+events for clustering. Each endpoint is described through several views:
 
-The Peer Groups page shows the signals that distinguish a group from the fleet, for
-example:
+- **application footprint**: a broad set of routinely observed non-Windows executable
+  basenames, including common applications with deliberately low weight;
+- **application combinations**: recurring pairs of applications observed together on
+  endpoints, providing an explainable co-occurrence layer above individual apps;
+- **process ecology**: parent -> child relationships for non-Windows applications;
+- **network role**: which non-Windows applications show IP or DNS activity;
+- **activity pattern**: coarse six-hour UTC activity windows;
+- **platform characteristics**: Windows-path applications and their known
+  parent-child relationships, retained for technical-cluster discovery only.
+
+Exact destination IPs/domains, usernames and file hashes are not grouping vectors.
+Relationships with a missing/unknown parent are also excluded rather than being
+interpreted as meaningful `->child.exe` evidence.
+
+Application-set comparison deliberately does not use an unbounded rarity score. Very
+common applications retain a small amount of weight so a full software footprint can
+be compared, while rarer applications receive only a bounded increase. This reduces
+the chance that one Epson helper, one rollout component or one new OS binary dominates
+similarity.
+
+## Multi-view decision
+
+Candidate endpoint pairs are generated through bounded inverted indexes. For each
+candidate DeepSnout calculates separate weighted-set similarities for applications,
+application combinations, process relationships, network-active applications and
+activity windows.
+
+The current pilot thresholds require:
+
+- overall multi-channel peer similarity of at least 0.50;
+- application-footprint similarity of at least 0.42;
+- at least three shared application features in small populations, or four in larger
+  populations;
+- supporting agreement from at least one additional view (application combinations,
+  process ecology, network role or activity pattern).
+
+These are deterministic pilot defaults, not validated universal clustering constants.
+The important safety property is structural: **platform characteristics do not
+contribute to peer suitability**, even though they can define a technical cluster.
+
+A second distinctive-feature graph is used to retain narrow technical discoveries.
+It uses bounded inverse-fleet-frequency features and cosine similarity, but its output
+is explicitly marked `technical` and cannot become detector-suppressive automatically.
+
+## Explanations and correlated signals
+
+The UI shows both channel-level similarity and concrete distinguishing signals.
+Application co-occurrence can therefore appear as, for example:
 
 ```
-acad.exe                  92% group / 3% fleet
-explorer.exe -> acad.exe  76% group / 1% fleet
-acad.exe network activity 54% group / 4% fleet
+application bundle saplogon.exe + scannerclient.exe
+application bundle saplogon.exe + businessclient.exe
 ```
 
-The percentages are intended to let an analyst judge whether the generated group
+Correlated consequences of one executable are collapsed where possible. Rather than
+showing an application, its path, its normal parent and its network presence as four
+independent reasons, DeepSnout prefers one application reason with supporting detail.
+This makes the explanation closer to the number of genuinely distinct reasons behind
+the group.
+
+Group/fleet percentages remain visible so an analyst can judge whether a suggestion
 has an operationally meaningful identity. The group page also provides a searchable
 endpoint list and sample members.
 
@@ -69,7 +117,8 @@ endpoint list and sample members.
 
 Suggested automatic groups receive generated labels. An analyst can:
 
-- approve and rename a suggestion;
+- approve and rename a recommended suggestion;
+- track and rename a technical cluster (still non-suppressive);
 - reject a suggestion;
 - create a manual group;
 - assign an endpoint to any existing approved/manual group or leave it unassigned.
@@ -81,7 +130,7 @@ assignments are never overwritten by automatic discovery.
 Approved automatic groups are refreshed when the same defining fingerprint is
 rediscovered. If that fingerprint disappears, the current version deliberately
 leaves the approved group unchanged rather than silently redefining its identity.
-Full membership/prototype drift scoring and review thresholds are the next focused
+Full membership/prototype drift scoring and review thresholds remain the next focused
 peer-group safety change.
 
 ## Detector semantics
@@ -91,26 +140,33 @@ Peer groups augment that local comparison; they do not replace it.
 
 For a host in a peer group, DeepSnout counts peers in the same namespace that have
 sufficient history for the same application. The existing policy defaults remain:
-10 qualified peer hosts and a 10% common-peer fraction. If the peer group is
-eligible to suppress and at least 10 peers qualify, a context observed on 10% or
-more of those peers is no longer considered peer-rare.
+10 qualified peer hosts and a 10% common-peer fraction.
 
-For an immature automatic group, DeepSnout may record `peer_seen` and
-`peer_eligible`, but marks the peer population non-suppressive. Therefore an early
-or unstable grouping cannot make a new execution context disappear from
-DS-EXEC-002 merely because the clustering system has only limited evidence.
+Peer-common behavior can suppress DS-EXEC-002 only when an automatic group is all of:
 
-## Known first-version boundaries
+- analyst-approved;
+- `recommended` by the multi-channel algorithm;
+- stable (median at least seven observed days);
+- calculated from completed historical days rather than today's partial data.
+
+Technical clusters may expose peer membership/context after approval but are always
+non-suppressive. Legacy automatic groups that predate the v2 suitability assessment
+also fail closed and cannot suppress until rediscovered/classified by v2.
+
+## Known boundaries
 
 - One active detector peer group per endpoint; arbitrary overlapping tags are not
   implemented.
-- Automatic group identity currently uses a defining-feature fingerprint rather
-  than a full historical centroid/membership lineage.
+- Application identity is currently executable-basename based. Product/company and
+  reliable OS inventory metadata are not yet retained, so several executables from
+  one suite can still look like several applications.
+- Automatic group identity uses a defining-feature fingerprint rather than a full
+  historical centroid/membership lineage.
 - Suggested/approved metadata is stored as bounded application state while
   `Host.cohort` remains the active detector membership. A richer normalized schema
   can follow when drift history and overlapping metadata justify it.
 - Similarity thresholds are deterministic pilot defaults, not validated universal
   clustering parameters.
-- Fleet size, role mixture and telemetry coverage can materially affect discovered
-  groups. The UI therefore exposes explanations and requires approval rather than
-  silently enabling suggestions.
+- Fleet size, role mixture and telemetry coverage materially affect discovered
+  groups. The UI exposes explanations and requires approval rather than silently
+  enabling suggestions.
