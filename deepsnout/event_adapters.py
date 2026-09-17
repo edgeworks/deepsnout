@@ -91,14 +91,14 @@ _SYMBOLIC_SUPPORTED = {
     "DNS_QUERY": 22,
 }
 
-# Only names actually observed/verified in this compatibility dialect belong
-# here. Unknown symbolic IDs remain malformed instead of being silently ignored.
-# An expected Task may be supplied where the symbolic ID is an Event 255 error
-# subtype rather than a normal Sysmon event-family name.
+# Friendly labels for symbolic unsupported forms we have observed. The adapter
+# also has a bounded generic Task=255 rule below so every new symbolic control/
+# error subtype does not require another release.
 _SYMBOLIC_UNSUPPORTED = {
-    "IMAGE_LOAD": ("image-load", None),
-    "QUEUE": ("sysmon-error-queue", 255),
-    "GETCONFIGURATIONOPTIONS": ("sysmon-error-get-configuration-options", 255),
+    "IMAGE_LOAD": "image-load",
+    "QUEUE": "sysmon-symbolic-queue",
+    "GETCONFIGURATIONOPTIONS": "sysmon-symbolic-get-configuration-options",
+    "DRIVERCOMMUNICATION": "sysmon-symbolic-driver-communication",
 }
 
 # These are not a global claim that Windows Task == Sysmon EventID. They describe
@@ -146,6 +146,11 @@ def _supported_signature_matches(event, event_id):
     return False
 
 
+def _supported_signature_ids(event):
+    return [event_id for event_id in sorted(SUPPORTED_EVENT_IDS)
+            if _supported_signature_matches(event, event_id)]
+
+
 def _unsupported_task_shape(event, task):
     definition = _UNSUPPORTED_TASK_SIGNATURES.get(task)
     if not definition:
@@ -162,8 +167,15 @@ def _cribl_flat_sysmon(event):
     Sysmon identity. Generic ``ID`` and Windows ``Task`` remain compatibility
     hints, not core EventID aliases. Supported hints need event-specific payload
     corroboration; unsupported Task values are ignored only for verified payload
-    signatures observed in this dialect. Verified Event-255 symbolic error IDs
-    additionally require Task=255.
+    signatures observed in this dialect.
+
+    The pilot also shows many metadata/control/error-like records with a symbolic
+    ``ID`` and ``Task=255`` (for example QUEUE, GetConfigurationOptions and
+    DriverCommunication). Once Sysmon identity and the flat shape are trusted, a
+    symbolic Task-255 record that does *not* match any supported 1/3/22 payload
+    signature is classified as unsupported. This prevents an open-ended list of
+    irrelevant symbolic subtypes while still failing closed if such a record looks
+    like a supported event whose symbolic name changed unexpectedly.
     """
     if not _flat_windows_shape(event) or not _trusted_sysmon(event):
         return None
@@ -188,19 +200,6 @@ def _cribl_flat_sysmon(event):
                 warnings.append(f"EventID inferred by cribl-flat-sysmon adapter from symbolic ID {symbolic}")
             else:
                 detail["symbolic_signature_mismatch"] = symbolic
-        elif symbolic in _SYMBOLIC_UNSUPPORTED:
-            label, expected_task = _SYMBOLIC_UNSUPPORTED[symbolic]
-            if expected_task is None or task == expected_task:
-                return AdapterContribution(
-                    "cribl-flat-sysmon",
-                    fields=fields,
-                    warnings=tuple(warnings),
-                    unsupported_reason=("Recognized unsupported flat Sysmon shape from cribl-flat-sysmon adapter: "
-                                        f"{label} (ID={symbolic}" +
-                                        (f", Task={task}" if expected_task is not None else "") + ")"),
-                    detail=detail,
-                )
-            detail["symbolic_task_mismatch"] = f"expected {expected_task}, got {task_text or '<missing>'}"
         elif raw_symbol.isdigit():
             numeric = int(raw_symbol)
             if numeric in SUPPORTED_EVENT_IDS and _supported_signature_matches(event, numeric):
@@ -214,6 +213,20 @@ def _cribl_flat_sysmon(event):
                         unsupported_reason=("Recognized unsupported flat Sysmon shape from cribl-flat-sysmon adapter: "
                                             f"{unsupported} (ID={numeric})"),
                         detail=detail)
+        elif task == 255:
+            supported_matches = _supported_signature_ids(event)
+            if supported_matches:
+                detail["task255_supported_signature_conflict"] = ",".join(str(value) for value in supported_matches)
+            else:
+                label = _SYMBOLIC_UNSUPPORTED.get(symbolic, "sysmon-symbolic-task255")
+                return AdapterContribution(
+                    "cribl-flat-sysmon",
+                    fields=fields,
+                    warnings=tuple(warnings),
+                    unsupported_reason=("Recognized unsupported symbolic flat Sysmon shape from cribl-flat-sysmon adapter: "
+                                        f"{label} (ID={symbolic}, Task=255)"),
+                    detail=detail,
+                )
         else:
             detail["unrecognized_symbolic_id"] = symbolic
 
