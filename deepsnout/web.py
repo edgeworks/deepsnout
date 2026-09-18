@@ -368,7 +368,7 @@ def create_app(config=None):
         await form_data(request)
         with transaction(engine) as db:
             user=login_user(request,db,{"admin","analyst"})
-            job=enqueue(db,"peer_groups")
+            job=enqueue(db,"peer_groups",{"origin":"operator","requested_by":user.username})
             audit(db,user.username,"peer_groups.refresh",job.id)
             destination="/jobs/"+job.id if user.role=="admin" else "/peer-groups"
         return RedirectResponse(destination,303)
@@ -457,7 +457,7 @@ def create_app(config=None):
         with transaction(engine) as db:
             user=login_user(request,db,{"admin"}); source=found(db,Source,source_id)
             if action in {"poll","test"}:
-                destination="/jobs/"+enqueue(db,action,source_id=source_id).id
+                destination="/jobs/"+enqueue(db,action,{"origin":"operator","requested_by":user.username},source_id=source_id).id
             elif action=="toggle":
                 source.enabled=not source.enabled; destination="/sources"
             else: raise ValueError("Unknown source action")
@@ -494,7 +494,7 @@ def create_app(config=None):
     async def queue_action(request,kind):
         await form_data(request)
         with transaction(engine) as db:
-            user=login_user(request,db,{"admin"}); job=enqueue(db,kind)
+            user=login_user(request,db,{"admin"}); job=enqueue(db,kind,{"origin":"operator","requested_by":user.username})
             audit(db,user.username,kind+".queued",job.id)
             destination="/jobs/"+job.id
         return RedirectResponse(destination,303)
@@ -536,7 +536,8 @@ def create_app(config=None):
         with transaction(engine) as db:
             user=login_user(request,db,{"admin"}); job=found(db,Job,job_id)
             if job.status=="queued":
-                job.status,job.finished,job.error,job.payload="cancelled",now(),"Cancelled by operator",{}
+                kept={"origin":job.payload.get("origin")} if isinstance(job.payload,dict) and job.payload.get("origin") else {}
+                job.status,job.finished,job.error,job.payload="cancelled",now(),"Cancelled by operator",kept
             elif job.status=="running":
                 job.status,job.error="cancel_requested","Cancellation requested; the worker will stop at the next safe check."
             elif job.status=="cancel_requested":
