@@ -142,7 +142,9 @@ def _feature_anchor(channel, feature):
 
 
 def _add_feature(store, host_id, channel, feature, day):
-    store[host_id][channel][feature].add(day)
+    # Reference windows are at most 28 days. A compact day bitset avoids keeping
+    # hundreds of thousands of tiny Python set objects for enterprise profiles.
+    store[host_id][channel][feature] |= 1 << (int(day) % 64)
 
 
 def _namespace_profiles(db, namespace, clock, progress=None):
@@ -159,7 +161,7 @@ def _namespace_profiles(db, namespace, clock, progress=None):
         BehaviorDay.day < current_day).limit(1)) is not None
     allowed_end = current_day - 1 if have_completed_day else current_day
 
-    feature_days = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
+    feature_days = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     host_days = defaultdict(set)
     _progress(progress, "behavior-summaries", namespace=namespace, hosts=len(hosts))
     behavior_query = select(
@@ -221,7 +223,7 @@ def _namespace_profiles(db, namespace, clock, progress=None):
         raw[host_id] = {}
         for channel, features in feature_days[host_id].items():
             raw[host_id][channel] = {
-                feature: len(observed) / denominator for feature, observed in features.items()
+                feature: observed.bit_count() / denominator for feature, observed in features.items()
             }
 
     n = len(raw)
