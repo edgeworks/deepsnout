@@ -39,6 +39,8 @@ def enqueue(db, kind, payload=None, source_id=None):
     job = Job(kind=kind, source_id=source_id, payload=payload or {})
     db.add(job)
     db.flush()
+    if kind == "peer_groups":
+        set_state(db, "peer_group_last_attempt", {"at": now(), "job_id": job.id})
     return job
 
 
@@ -80,6 +82,21 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         source = db.get(Source, job.source_id) if job.source_id else None
         snapshot = ({"id": source.id, "config": source.config, "credential": source.credential,
                      "namespace": source.namespace, "checkpoint": source.checkpoint} if source else None)
+        started_at = job.started
+
+    def progress(stage, detail=None):
+        with transaction(engine) as heartbeat_db:
+            current = heartbeat_db.get(Job, job_id)
+            set_state(heartbeat_db, "worker", {
+                "heartbeat": now(), "state": "running", "job_id": job_id,
+                "job_kind": kind, "job_started": started_at, "stage": stage,
+                "detail": detail or {},
+            })
+            if current and current.status == "cancel_requested":
+                raise SplunkError("Job cancellation requested")
+
+    LOG.info("Job %s started kind=%s source=%s", job_id, kind, snapshot["id"] if snapshot else "-")
+    progress("starting")
     try:
         records, result, next_checkpoint = None, {}, None
         if kind in {"poll", "test"}:
@@ -89,7 +106,10 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             client = client_factory(settings, crypto(config).decrypt(snapshot["credential"].encode()).decode(),
                                     allow_http=config.allow_http_connectors)
             if hasattr(client, "cancel_check"):
-                client.cancel_check = lambda: _cancel_requested(engine, job_id)
+                def poll_check():
+                    progress("splunk-" + kind)
+                    return _cancel_requested(engine, job_id)
+                client.cancel_check = poll_check
             if kind == "poll" and hasattr(client, "operation_deadline"):
                 client.operation_deadline = time.monotonic() + POLL_WALL_BUDGET
             try:
@@ -134,7 +154,7 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned")}
                 evaluate_windows(db)
             if kind == "peer_groups":
-                result = refresh_peer_groups(db)
+                result = refresh_peer_groups(db, progress=progress)
             if kind == "remove_demo":
                 ids = select(Host.id).where(Host.namespace == "demo")
                 count = db.scalar(select(func.count()).select_from(Host).where(Host.namespace == "demo"))
@@ -159,11 +179,13 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     source.checkpoint = next_checkpoint
             job.status, job.finished, job.report, job.payload = "done", now(), result, {}
             audit(db, "worker", "job.completed", job.id, kind)
+        LOG.info("Job %s completed kind=%s runtime=%.1fs", job_id, kind, now() - started_at)
     except Exception as exc:
         from .engine import CapacityError
         message = str(exc)[:600] if isinstance(exc, (SplunkError, CapacityError, ValueError)) else type(exc).__name__ + ": inspect worker logs"
         failure_report = exc.report if isinstance(exc, SplunkError) and exc.report else {}
-        LOG.error("Job %s failed (%s)", job_id, type(exc).__name__)
+        LOG.error("Job %s failed kind=%s type=%s runtime=%.1fs message=%s",
+                  job_id, kind, type(exc).__name__, now() - started_at, message)
         with transaction(engine) as db:
             job = db.get(Job, job_id)
             if job.status == "cancel_requested":
@@ -181,7 +203,7 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
 
 def tick(engine, config, guard=lambda: None):
     with transaction(engine) as db:
-        set_state(db, "worker", {"heartbeat": now(), "state": "running"})
+        set_state(db, "worker", {"heartbeat": now(), "state": "idle"})
         for source in db.scalars(select(Source).where(Source.enabled.is_(True), Source.kind == "splunk")):
             settings = SplunkSettings.model_validate(source.config)
             catching_up = source.checkpoint is not None and source.checkpoint < int(now()) - settings.lag - settings.window
@@ -192,7 +214,10 @@ def tick(engine, config, guard=lambda: None):
                 source.last_poll = now()
         peer_state = db.get(State, "peer_group_suggestions")
         peer_updated = peer_state.value.get("updated_at", 0) if peer_state else 0
-        if db.scalar(select(func.count()).select_from(Host)) and now() - peer_updated >= 3600:
+        peer_attempt_state = db.get(State, "peer_group_last_attempt")
+        peer_attempted = peer_attempt_state.value.get("at", 0) if peer_attempt_state else 0
+        if (db.scalar(select(func.count()).select_from(Host))
+                and now() - max(peer_updated, peer_attempted) >= 3600):
             enqueue(db, "peer_groups")
         job = db.scalar(select(Job).where(Job.status == "queued").order_by(Job.created).limit(1))
         job_id = job.id if job else None
@@ -210,14 +235,26 @@ def tick(engine, config, guard=lambda: None):
 
 def run(engine, config):
     with worker_lock(engine, config) as guard:
+        LOG.info("Analysis worker started")
         with transaction(engine) as db:
             for job in db.scalars(select(Job).where(Job.status == "cancel_requested")):
                 job.status, job.finished, job.payload = "cancelled", now(), {}
                 audit(db, "worker", "job.cancelled", job.id, "Recovered cancellation after worker restart")
+                LOG.warning("Recovered pending cancellation for job %s kind=%s", job.id, job.kind)
             for job in db.scalars(select(Job).where(Job.status == "running")):
-                job.status, job.started = "queued", 0
-                job.error = "Worker restarted while this job was running; checkpoint was unchanged and the job was requeued."
-                audit(db, "worker", "job.recovered", job.id, job.kind)
+                message = ("Worker restarted while this job was running. The interrupted job was failed; "
+                           "transactional checkpoints were not advanced.")
+                job.status, job.finished, job.error = "failed", now(), message
+                if job.kind == "peer_groups":
+                    set_state(db, "peer_group_last_attempt", {"at": now(), "job_id": job.id,
+                                                              "recovered": True})
+                if job.source_id:
+                    source = db.get(Source, job.source_id)
+                    if source:
+                        source.last_error = message
+                        source.last_poll = now()
+                audit(db, "worker", "job.interrupted", job.id, job.kind)
+                LOG.error("Recovered interrupted job %s kind=%s as failed", job.id, job.kind)
         while True:
             guard()
             try:
