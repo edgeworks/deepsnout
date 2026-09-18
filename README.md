@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a11, initial runnable pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a12, initial runnable pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -40,6 +40,7 @@ limited source and known examples. See [the exact verification boundary](docs/te
   automatic groups (or explicit manual groups) may provide suppressive peer-common
   evidence to DS-EXEC-002. Correlated app/parent/network signals are collapsed in
   explanations. See [Peer groups](docs/peer-groups.md).
+- Durable single-writer jobs are visible under **Operations**, including queued/running state, source, runtime and operator cancellation. Running Splunk polls use cooperative cancellation and a 15-minute wall budget; cancellation never advances the checkpoint. Interrupted running jobs are explicitly recovered after worker restart.
 - Prior-day references, qualified application peers, bounded evidence,
   temporary process metadata and fixed-size approximate diversity summaries.
 - Investigation inbox, endpoint/discovery views, evidence export, decisions,
