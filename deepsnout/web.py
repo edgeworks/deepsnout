@@ -522,13 +522,29 @@ def create_app(config=None):
         await form_data(request)
         with transaction(engine) as db:
             user=login_user(request,db,{"admin"}); job=found(db,Job,job_id)
-            if job.status!="failed": raise ValueError("Only failed jobs can be retried")
+            if job.status not in {"failed","cancelled"}: raise ValueError("Only failed or cancelled jobs can be retried")
             if job.source_id and db.scalar(select(Job).where(Job.source_id==job.source_id,
                     Job.id!=job.id,Job.status.in_(["queued","running"]))):
                 raise ValueError("This source already has a pending job")
-            job.status,job.error,job.finished="queued","",0
+            job.status,job.error,job.finished,job.started="queued","",0,0
             audit(db,user.username,"job.retry",job_id)
         return RedirectResponse("/jobs/"+job_id,303)
+
+    @app.post("/jobs/{job_id}/cancel")
+    async def cancel_job(request: Request,job_id: str):
+        await form_data(request)
+        with transaction(engine) as db:
+            user=login_user(request,db,{"admin"}); job=found(db,Job,job_id)
+            if job.status=="queued":
+                job.status,job.finished,job.error,job.payload="cancelled",now(),"Cancelled by operator",{}
+            elif job.status=="running":
+                job.status,job.error="cancel_requested","Cancellation requested; the worker will stop at the next safe check."
+            elif job.status=="cancel_requested":
+                pass
+            else:
+                raise ValueError("Only queued or running jobs can be cancelled")
+            audit(db,user.username,"job.cancel_requested",job_id,job.kind)
+        return RedirectResponse("/operations",303)
 
     @app.get("/operations")
     def operations(request: Request):
@@ -539,8 +555,9 @@ def create_app(config=None):
                     for m in [Host,Seen,Process,BehaviorDay,Window,Finding]}
             orphan=db.scalar(select(func.count()).select_from(Process).where(Process.created.is_(None)))
             jobs=db.scalars(select(Job).order_by(Job.created.desc()).limit(40)).all()
+            source_names={row.id:row.name for row in db.scalars(select(Source)).all()}
             logs=db.scalars(select(Audit).order_by(Audit.created.desc()).limit(60)).all()
-            return view(request,"operations.html",user=user,states=states,counts=counts,jobs=jobs,logs=logs,orphan=orphan,psl=psl_available())
+            return view(request,"operations.html",user=user,states=states,counts=counts,jobs=jobs,logs=logs,orphan=orphan,psl=psl_available(),source_names=source_names)
 
     @app.get("/settings")
     def settings_page(request: Request):
