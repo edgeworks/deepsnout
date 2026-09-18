@@ -378,6 +378,14 @@ class SplunkClient:
                      "User-Agent": "DeepSnout/0.1"},
             timeout=timeout, follow_redirects=False, transport=transport, limits=limits)
         self.sleep = sleep
+        self.cancel_check = None
+        self.operation_deadline = None
+
+    def _operation_guard(self):
+        if self.cancel_check and self.cancel_check():
+            raise SplunkError("Job cancellation requested")
+        if self.operation_deadline is not None and time.monotonic() >= self.operation_deadline:
+            raise SplunkError("Splunk poll exceeded the 15-minute worker budget; checkpoint was not advanced")
 
     def _verify_pin(self, response):
         if self._pin:
@@ -412,6 +420,7 @@ class SplunkClient:
         self.client.close()
 
     def request(self, method, path, data=None):
+        self._operation_guard()
         kwargs = {"params": data} if method == "GET" else {"data": data}
         try:
             with self.client.stream(method, path, **kwargs) as response:
@@ -420,6 +429,7 @@ class SplunkClient:
                     raise SplunkError(f"Splunk returned HTTP {response.status_code}; verify URL, permissions, certificate and token")
                 body = bytearray()
                 for chunk in response.iter_bytes():
+                    self._operation_guard()
                     body.extend(chunk)
                     if len(body) > 16 * 1024 * 1024:
                         raise SplunkError("Splunk response exceeded 16 MiB; reduce the source window")
@@ -430,6 +440,7 @@ class SplunkClient:
             raise SplunkError("Splunk transport/TLS failure; verify reachability, CA trust, certificate pin and proxy settings") from None
         except (json.JSONDecodeError, UnicodeError, RecursionError):
             raise SplunkError("Splunk did not return valid JSON") from None
+        self._operation_guard()
         if not isinstance(result, dict):
             raise SplunkError("Splunk returned an unexpected JSON structure")
         for message in result.get("messages", []):
@@ -463,6 +474,7 @@ class SplunkClient:
         try:
             deadline = time.monotonic() + 150
             while True:
+                self._operation_guard()
                 response = self.request("GET", path, {"output_mode": "json"})
                 entries = response.get("entry", [])
                 if not entries:
@@ -477,6 +489,7 @@ class SplunkClient:
                 if time.monotonic() >= deadline:
                     raise SplunkError("Splunk search timed out; checkpoint was not advanced")
                 self.sleep(1)
+                self._operation_guard()
             if "resultCount" not in status:
                 raise SplunkError("Completed search did not report resultCount; refusing to advance")
             for message in status.get("messages", []):
@@ -494,6 +507,7 @@ class SplunkClient:
             diagnostic_lookup = {}
             offset = 0
             while offset < count:
+                self._operation_guard()
                 if time.monotonic() >= deadline:
                     raise SplunkError("Result retrieval timed out; checkpoint was not advanced")
                 page = self.request("GET", "/services/search/v2/jobs/" + quote(sid, safe="") + "/results",
@@ -542,6 +556,7 @@ class SplunkClient:
 
     def slice(self, start, end):
         while True:
+            self._operation_guard()
             try:
                 events, report = self.query(start, end)
                 return events, report, end
