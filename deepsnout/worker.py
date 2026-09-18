@@ -9,7 +9,7 @@ from .db import (transaction, Source, Job, State, Host, Coverage, Process, Behav
 from .normalize import Event, digest
 from .engine import ingest, evaluate_windows, maintenance
 from .peer_groups import refresh_peer_groups
-from .splunk import SplunkClient, SplunkSettings
+from .splunk import SplunkClient, SplunkSettings, SplunkError
 from .security import crypto
 from .demo import fixtures
 
@@ -157,7 +157,6 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             job.status, job.finished, job.report, job.payload = "done", now(), result, {}
             audit(db, "worker", "job.completed", job.id, kind)
     except Exception as exc:
-        from .splunk import SplunkError
         from .engine import CapacityError
         message = str(exc)[:600] if isinstance(exc, (SplunkError, CapacityError, ValueError)) else type(exc).__name__ + ": inspect worker logs"
         failure_report = exc.report if isinstance(exc, SplunkError) and exc.report else {}
