@@ -29,6 +29,14 @@ MAX_REFERENCE_DAYS = 28
 MAX_REJECTIONS = 500
 BUNDLE_APPS_PER_HOST = 18
 TECHNICAL_FEATURES_PER_HOST = 36
+STREAM_BATCH = 2000
+PROGRESS_EVERY = 25000
+
+
+def _progress(callback, stage, **detail):
+    if callback:
+        callback(stage, detail)
+
 
 # Peer suitability deliberately gives platform characteristics no vote. They remain
 # useful for explaining technical clusters but cannot establish behavioral peers.
@@ -137,7 +145,7 @@ def _add_feature(store, host_id, channel, feature, day):
     store[host_id][channel][feature].add(day)
 
 
-def _namespace_profiles(db, namespace, clock):
+def _namespace_profiles(db, namespace, clock, progress=None):
     """Build multi-channel endpoint profiles for one source namespace."""
     current_day = int(clock) // DAY
     first_day = current_day - (MAX_REFERENCE_DAYS - 1)
@@ -146,16 +154,26 @@ def _namespace_profiles(db, namespace, clock):
     if len(hosts) < 3:
         return {}, {}, hosts, {}, False, 0
 
-    behavior = db.scalars(select(BehaviorDay).where(
-        BehaviorDay.host_id.in_(hosts), BehaviorDay.day >= first_day,
-        BehaviorDay.day <= current_day)).all()
-    have_completed_day = any(row.day < current_day for row in behavior)
+    have_completed_day = db.scalar(select(BehaviorDay.id).join(Host).where(
+        Host.namespace == namespace, BehaviorDay.day >= first_day,
+        BehaviorDay.day < current_day).limit(1)) is not None
     allowed_end = current_day - 1 if have_completed_day else current_day
-    behavior = [row for row in behavior if row.day <= allowed_end]
 
     feature_days = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
     host_days = defaultdict(set)
-    for row in behavior:
+    _progress(progress, "behavior-summaries", namespace=namespace, hosts=len(hosts))
+    behavior_query = select(
+        BehaviorDay.host_id, BehaviorDay.day, BehaviorDay.app, BehaviorDay.parent,
+        BehaviorDay.location, BehaviorDay.first_seen, BehaviorDay.last_seen
+    ).join(Host).where(
+        Host.namespace == namespace, BehaviorDay.day >= first_day,
+        BehaviorDay.day <= allowed_end
+    ).execution_options(yield_per=STREAM_BATCH)
+    behavior_rows = 0
+    for row in db.execute(behavior_query):
+        behavior_rows += 1
+        if behavior_rows % PROGRESS_EVERY == 0:
+            _progress(progress, "behavior-summaries", namespace=namespace, rows=behavior_rows)
         host_days[row.host_id].add(row.day)
         app = str(row.app or "").lower()
         parent = str(row.parent or "").lower()
@@ -176,9 +194,17 @@ def _namespace_profiles(db, namespace, clock):
 
     start = first_day * DAY
     end = (allowed_end + 1) * DAY
-    windows = db.scalars(select(Window).where(
-        Window.host_id.in_(hosts), Window.start >= start, Window.start < end)).all()
-    for row in windows:
+    _progress(progress, "network-summaries", namespace=namespace, behavior_rows=behavior_rows)
+    window_query = select(
+        Window.host_id, Window.start, Window.app, Window.location, Window.kind
+    ).join(Host).where(
+        Host.namespace == namespace, Window.start >= start, Window.start < end
+    ).execution_options(yield_per=STREAM_BATCH)
+    window_rows = 0
+    for row in db.execute(window_query):
+        window_rows += 1
+        if window_rows % PROGRESS_EVERY == 0:
+            _progress(progress, "network-summaries", namespace=namespace, rows=window_rows)
         day = row.start // DAY
         host_days[row.host_id].add(day)
         app = str(row.app or "").lower()
@@ -186,6 +212,8 @@ def _namespace_profiles(db, namespace, clock):
         if _valid_app(app) and location != "windows":
             _add_feature(feature_days, row.host_id, "network", f"net:{app}:{row.kind}", day)
         _add_feature(feature_days, row.host_id, "activity", _activity_key(row.start), day)
+    _progress(progress, "profile-build", namespace=namespace,
+              behavior_rows=behavior_rows, network_rows=window_rows)
 
     raw = {}
     for host_id, days in host_days.items():
@@ -323,7 +351,7 @@ def _components(nodes, edges):
     return list(grouped.values())
 
 
-def _candidate_pairs(profiles, technical=False):
+def _candidate_pairs(profiles, technical=False, progress=None, stage="candidate-pairs"):
     n = len(profiles)
     buckets = defaultdict(list)
     if technical:
@@ -338,12 +366,19 @@ def _candidate_pairs(profiles, technical=False):
 
     candidate_hits = defaultdict(int)
     maximum_bucket = n if n < 20 else max(16, min(300, int(n * 0.45)))
+    pair_iterations = 0
     for members in buckets.values():
         if not 2 <= len(members) <= maximum_bucket:
             continue
         for left, right in combinations(sorted(members), 2):
             candidate_hits[(left, right)] += 1
+            pair_iterations += 1
+            if pair_iterations % PROGRESS_EVERY == 0:
+                _progress(progress, stage, pair_iterations=pair_iterations,
+                          candidate_pairs=len(candidate_hits))
     minimum_shared = 1 if n < 20 else 2
+    _progress(progress, stage, pair_iterations=pair_iterations,
+              candidate_pairs=len(candidate_hits))
     return [pair for pair, hits in candidate_hits.items() if hits >= minimum_shared]
 
 
@@ -530,15 +565,18 @@ def _build_group(namespace, members, profiles, raw, hosts, fleet_df, includes_cu
     }
 
 
-def _discover_namespace(db, namespace, clock):
-    profiles, raw, hosts, fleet_df, includes_current_day, namespace_days = _namespace_profiles(db, namespace, clock)
+def _discover_namespace(db, namespace, clock, progress=None):
+    profiles, raw, hosts, fleet_df, includes_current_day, namespace_days = _namespace_profiles(
+        db, namespace, clock, progress=progress)
     n = len(profiles)
     if n < 3:
         return [], {"namespace": namespace, "hosts_profiled": n, "observed_days": namespace_days,
                     "includes_current_day": includes_current_day, "recommended": 0, "technical": 0}
 
     peer_edges = []
-    for left, right in _candidate_pairs(profiles, technical=False):
+    _progress(progress, "peer-candidates", namespace=namespace, hosts=n)
+    for left, right in _candidate_pairs(profiles, technical=False, progress=progress,
+                                        stage="peer-candidates"):
         eligible, _, _ = _peer_pair_eligible(profiles[left], profiles[right], n)
         if eligible:
             peer_edges.append((left, right))
@@ -560,7 +598,9 @@ def _discover_namespace(db, namespace, clock):
     # A second graph intentionally preserves useful narrow technical discoveries.
     # They are shown to the analyst but never become suppressive automatic peers.
     technical_edges = []
-    for left, right in _candidate_pairs(profiles, technical=True):
+    _progress(progress, "technical-candidates", namespace=namespace, hosts=n)
+    for left, right in _candidate_pairs(profiles, technical=True, progress=progress,
+                                        stage="technical-candidates"):
         if _cosine(profiles[left]["technical"], profiles[right]["technical"]) >= TECHNICAL_SIMILARITY_THRESHOLD:
             technical_edges.append((left, right))
     seen_member_sets = {frozenset(group["members"]) for group in groups}
@@ -592,7 +632,7 @@ def _discover_namespace(db, namespace, clock):
     }
 
 
-def refresh_peer_groups(db, clock=None):
+def refresh_peer_groups(db, clock=None, progress=None):
     """Discover suggestions and refresh membership of matching approved auto groups."""
     clock = now() if clock is None else clock
     registry_state = _state_value(db, "peer_group_registry", {"groups": {}})
@@ -606,8 +646,10 @@ def refresh_peer_groups(db, clock=None):
                       if value.get("kind") == "auto" and value.get("status") == "approved" and value.get("fingerprint")}
 
     for namespace in namespaces:
-        groups, summary = _discover_namespace(db, namespace, clock)
+        _progress(progress, "namespace-start", namespace=namespace)
+        groups, summary = _discover_namespace(db, namespace, clock, progress=progress)
         summaries.append(summary)
+        _progress(progress, "namespace-groups", namespace=namespace, groups=len(groups))
         for group in groups:
             approved = by_fingerprint.get(group["fingerprint"])
             if approved:
@@ -637,6 +679,7 @@ def refresh_peer_groups(db, clock=None):
     value = {"updated_at": clock, "learning": learning, "summaries": summaries,
              "groups": suggestions, "algorithm": "multi-channel-profile-v2"}
     set_state(db, "peer_group_suggestions", value)
+    _progress(progress, "finalizing", namespaces=len(summaries), suggestions=len(suggestions))
     return {"suggestions": len(suggestions), "approved_auto_matched": len(matched_auto),
             "namespaces": len(summaries), "learning": learning,
             "recommended": sum(group.get("peer_suitability") == "recommended" for group in suggestions),
