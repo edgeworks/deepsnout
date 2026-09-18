@@ -14,18 +14,26 @@ from .security import crypto
 from .demo import fixtures
 
 LOG = logging.getLogger("deepsnout.worker")
+ACTIVE_JOB_STATUSES = ("queued", "running", "cancel_requested")
+POLL_WALL_BUDGET = 900
+
+
+def _cancel_requested(engine, job_id):
+    with transaction(engine) as db:
+        job = db.get(Job, job_id)
+        return bool(job and job.status == "cancel_requested")
 
 
 def enqueue(db, kind, payload=None, source_id=None):
-    count = db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(["queued", "running"]))) or 0
+    count = db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0
     if count >= 20:
         raise ValueError("Queue contains 20 pending jobs. Wait for the worker or inspect Operations")
     if source_id:
-        existing = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+        existing = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(ACTIVE_JOB_STATUSES)))
         if existing:
             return existing
     if kind == "peer_groups":
-        existing = db.scalar(select(Job).where(Job.kind == kind, Job.status.in_(["queued", "running"])))
+        existing = db.scalar(select(Job).where(Job.kind == kind, Job.status.in_(ACTIVE_JOB_STATUSES)))
         if existing:
             return existing
     job = Job(kind=kind, source_id=source_id, payload=payload or {})
@@ -61,7 +69,13 @@ def worker_lock(engine, config):
 def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: None):
     with transaction(engine) as db:
         job = db.get(Job, job_id)
-        job.status, job.started = "running", now()
+        if job.status == "cancel_requested":
+            job.status, job.finished, job.payload = "cancelled", now(), {}
+            audit(db, "worker", "job.cancelled", job.id, "Cancelled before execution")
+            return False
+        if job.status != "queued":
+            raise ValueError("Job is not queued")
+        job.status, job.started, job.error = "running", now(), ""
         kind, payload = job.kind, dict(job.payload)
         source = db.get(Source, job.source_id) if job.source_id else None
         snapshot = ({"id": source.id, "config": source.config, "credential": source.credential,
@@ -74,6 +88,10 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             settings = SplunkSettings.model_validate(snapshot["config"])
             client = client_factory(settings, crypto(config).decrypt(snapshot["credential"].encode()).decode(),
                                     allow_http=config.allow_http_connectors)
+            if hasattr(client, "cancel_check"):
+                client.cancel_check = lambda: _cancel_requested(engine, job_id)
+            if kind == "poll" and hasattr(client, "operation_deadline"):
+                client.operation_deadline = time.monotonic() + POLL_WALL_BUDGET
             try:
                 if kind == "test":
                     result = client.test()
@@ -99,8 +117,12 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         elif kind not in {"maintenance", "remove_demo", "peer_groups"}:
             raise ValueError("Unknown job kind")
         guard()
+        if _cancel_requested(engine, job_id):
+            raise SplunkError("Job cancellation requested")
         with transaction(engine) as db:
             job = db.get(Job, job_id)
+            if job.status == "cancel_requested":
+                raise SplunkError("Job cancellation requested")
             if snapshot:
                 source = db.get(Source, snapshot["id"])
                 if source.config != snapshot["config"] or source.credential != snapshot["credential"]:
@@ -142,6 +164,10 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         LOG.error("Job %s failed (%s)", job_id, type(exc).__name__)
         with transaction(engine) as db:
             job = db.get(Job, job_id)
+            if job.status == "cancel_requested":
+                job.status, job.finished, job.error, job.report, job.payload = "cancelled", now(), "Cancelled by operator", {}, {}
+                audit(db, "worker", "job.cancelled", job.id, kind)
+                return False
             job.status, job.finished, job.error, job.report = "failed", now(), message, failure_report
             if job.source_id:
                 source = db.get(Source, job.source_id)
@@ -158,7 +184,7 @@ def tick(engine, config, guard=lambda: None):
             settings = SplunkSettings.model_validate(source.config)
             catching_up = source.checkpoint is not None and source.checkpoint < int(now()) - settings.lag - settings.window
             if (catching_up and not source.last_error) or now() - source.last_poll >= settings.interval:
-                if (db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(["queued", "running"]))) or 0) >= 20:
+                if (db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0) >= 20:
                     break
                 enqueue(db, "poll", source_id=source.id)
                 source.last_poll = now()
@@ -183,8 +209,13 @@ def tick(engine, config, guard=lambda: None):
 def run(engine, config):
     with worker_lock(engine, config) as guard:
         with transaction(engine) as db:
+            for job in db.scalars(select(Job).where(Job.status == "cancel_requested")):
+                job.status, job.finished, job.payload = "cancelled", now(), {}
+                audit(db, "worker", "job.cancelled", job.id, "Recovered cancellation after worker restart")
             for job in db.scalars(select(Job).where(Job.status == "running")):
-                job.status = "queued"
+                job.status, job.started = "queued", 0
+                job.error = "Worker restarted while this job was running; checkpoint was unchanged and the job was requeued."
+                audit(db, "worker", "job.recovered", job.id, job.kind)
         while True:
             guard()
             try:
