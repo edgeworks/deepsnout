@@ -154,6 +154,18 @@ def test_private_sources_ca_validation_and_no_arbitrary_spl():
     with pytest.raises(ValueError): SplunkSettings(url='https://host',indexes='wef',malformed_tolerance=1001)
 
 
+def test_cooperative_cancel_and_poll_budget():
+    client,_=client_for([])
+    client.cancel_check=lambda: True
+    with pytest.raises(SplunkError,match='cancellation requested'):
+        client.query(100,200)
+    client.cancel_check=None
+    client.operation_deadline=0
+    with pytest.raises(SplunkError,match='15-minute worker budget'):
+        client.query(100,200)
+    client.close()
+
+
 def test_remote_error_does_not_echo_secrets():
     client=SplunkClient(SplunkSettings(url='https://splunk.example',indexes='wef'),'secret',
         transport=httpx.MockTransport(lambda _:httpx.Response(401,text='secret')))
