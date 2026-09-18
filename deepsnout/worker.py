@@ -150,6 +150,9 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                 result = {"demo_endpoints_removed": count}
             if kind == "maintenance":
                 result = {"deleted": maintenance(db)}
+            db.refresh(job)
+            if job.status == "cancel_requested":
+                raise SplunkError("Job cancellation requested")
             if snapshot:
                 source.last_success, source.last_error = now(), ""
                 if kind == "poll":
