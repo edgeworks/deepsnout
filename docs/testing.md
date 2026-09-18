@@ -1,8 +1,8 @@
-# Verification report - 0.1.0a11
+# Verification report - 0.1.0a12
 
 ## Automated verification
 
-The 0.1.0a11 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a12 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.
