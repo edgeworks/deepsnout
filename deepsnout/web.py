@@ -433,7 +433,7 @@ def create_app(config=None):
         with transaction(engine) as db:
             user=login_user(request,db,{"admin"}); source=db.get(Source,str(form.get("id","")))
             if source:
-                busy=db.scalar(select(Job).where(Job.source_id==source.id,Job.status.in_(["queued","running"])))
+                busy=db.scalar(select(Job).where(Job.source_id==source.id,Job.status.in_(["queued","running","cancel_requested"])))
                 if source.enabled or busy:
                     raise ValueError("Pause the source and wait for pending jobs before editing")
                 if source.namespace!=namespace:
