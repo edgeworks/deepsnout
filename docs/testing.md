@@ -1,8 +1,8 @@
-# Verification report - 0.1.0a12
+# Verification report - 0.1.0a13
 
 ## Automated verification
 
-The 0.1.0a12 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a13 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.
@@ -27,6 +27,13 @@ replay handling, peer qualification, same-day exclusion, scoped expectations,
 capacities, retention, Splunk source pagination/failure rollback, source TLS-pin
 configuration/fingerprint extraction, role/CSRF controls, command privacy,
 settings, account recovery, secret separation and GUI routes/decisions.
+
+Peer-group input processing now streams projected BehaviorDay/Window rows in bounded
+batches and stores per-feature day presence as compact bitsets. Worker progress,
+scheduled-attempt backoff, and interrupted-job recovery are exercised alongside the
+existing job cancellation tests. Unexpected worker restarts fail the interrupted job
+instead of silently replaying it in a crash loop; transactional checkpoints remain
+unchanged.
 
 Automatic peer-group tests exercise immediate same-day provisional discovery,
 multi-channel application/process/activity profiles, recurring application-pair
