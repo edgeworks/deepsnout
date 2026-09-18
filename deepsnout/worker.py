@@ -85,6 +85,8 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         started_at = job.started
 
     def progress(stage, detail=None):
+        if engine.dialect.name == "sqlite":
+            return
         with transaction(engine) as heartbeat_db:
             current = heartbeat_db.get(Job, job_id)
             set_state(heartbeat_db, "worker", {
@@ -177,7 +179,8 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                 source.last_success, source.last_error = now(), ""
                 if kind == "poll":
                     source.checkpoint = next_checkpoint
-            job.status, job.finished, job.report, job.payload = "done", now(), result, {}
+            kept_payload = {"origin": payload["origin"]} if payload.get("origin") else {}
+            job.status, job.finished, job.report, job.payload = "done", now(), result, kept_payload
             audit(db, "worker", "job.completed", job.id, kind)
         LOG.info("Job %s completed kind=%s runtime=%.1fs", job_id, kind, now() - started_at)
     except Exception as exc:
@@ -210,7 +213,7 @@ def tick(engine, config, guard=lambda: None):
             if (catching_up and not source.last_error) or now() - source.last_poll >= settings.interval:
                 if (db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0) >= 20:
                     break
-                enqueue(db, "poll", source_id=source.id)
+                enqueue(db, "poll", {"origin": "scheduler"}, source_id=source.id)
                 source.last_poll = now()
         peer_state = db.get(State, "peer_group_suggestions")
         peer_updated = peer_state.value.get("updated_at", 0) if peer_state else 0
@@ -218,7 +221,7 @@ def tick(engine, config, guard=lambda: None):
         peer_attempted = peer_attempt_state.value.get("at", 0) if peer_attempt_state else 0
         if (db.scalar(select(func.count()).select_from(Host))
                 and now() - max(peer_updated, peer_attempted) >= 3600):
-            enqueue(db, "peer_groups")
+            enqueue(db, "peer_groups", {"origin": "scheduler"})
         job = db.scalar(select(Job).where(Job.status == "queued").order_by(Job.created).limit(1))
         job_id = job.id if job else None
     if job_id:
