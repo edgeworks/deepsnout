@@ -69,6 +69,19 @@ def test_real_demo_finding_lifecycle(browser,engine,config):
     assert browser.get('/peer-groups/office').status_code==200
 
 
+def test_operations_can_cancel_queued_job(browser,engine):
+    with transaction(engine) as db:
+        job=Job(kind='maintenance'); db.add(job); db.flush(); jid=job.id
+    page=browser.get('/operations')
+    assert page.status_code==200 and jid in page.text and 'Cancel' in page.text
+    assert post(browser,'/jobs/'+jid+'/cancel').status_code==303
+    with transaction(engine) as db:
+        job=db.get(Job,jid)
+        assert job.status=='cancelled' and job.finished and job.payload=={}
+    detail=browser.get('/jobs/'+jid)
+    assert detail.status_code==200 and 'Retry job' in detail.text
+
+
 def test_import_drops_command_secrets(browser,engine,config):
     row=raw_event(CommandLine='utility.exe --password TEST-SECRET-COMMAND')
     response=post(browser,'/imports',text=json.dumps(row),namespace='test')
