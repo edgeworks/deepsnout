@@ -116,7 +116,9 @@ _UNSUPPORTED_TASK_SIGNATURES = {
     11: ("file-create", ("ProcessGuid", "TargetFilename", "CreationUtcTime")),
     12: ("registry-object-create-delete", ("ProcessGuid", "TargetObject", "EventType")),
     13: ("registry-value-set", ("ProcessGuid", "TargetObject", "EventType", "Details")),
-    15: ("file-create-stream-hash", ("ProcessGuid", "TargetFilename", "Hash", "Contents")),
+    # Contents is optional in the observed Cribl stream. Keep the classification
+    # narrow by requiring the stable Event 15 fields instead of depending on Contents.
+    15: ("file-create-stream-hash", ("ProcessGuid", "Image", "TargetFilename", "CreationUtcTime", "Hash")),
     16: ("sysmon-configuration-change", ("Configuration", "ConfigurationFileHash")),
 }
 
