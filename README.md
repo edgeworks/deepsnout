@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a13, initial runnable pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a14, initial runnable pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -21,7 +21,9 @@ limited source and known examples. See [the exact verification boundary](docs/te
   unsupported flat Sysmon shapes (including observed Tasks 2, 4, 5, 6, 7, 8, 11,
   12, 13, 15 and 16, plus observed Event-255 symbolic error IDs) are ignored only
   when their source-specific evidence corroborates the classification;
-  unknown/mismatched shapes still fail closed. No binary EVTX reader.
+  unknown/mismatched shapes still fail closed. The observed flat Cribl Sysmon Task 15
+FileCreateStreamHash shape may omit `Contents`; DeepSnout recognizes it using the
+remaining stable Event 15 payload fields. No binary EVTX reader.
 - GUI-configured **Splunk search-API pull** with encrypted credentials, strict
   CA/hostname TLS by default, an explicit per-source leaf-certificate pin mode
   for legacy management certificates, index-time checkpoints, pagination,
