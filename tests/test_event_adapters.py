@@ -120,6 +120,37 @@ def test_observed_unsupported_task_shapes_are_ignored(task, extra):
     assert report["invalid"] == 0
 
 
+def test_task15_without_contents_matches_observed_cribl_shape():
+    raw = flat_sysmon(
+        Task="15",
+        ProcessGuid=PROCESS_GUID,
+        Image=r"C:\Windows\System32\browser.exe",
+        TargetFilename=r"C:\Users\user\Downloads\file.bin:Zone.Identifier",
+        CreationUtcTime="2026-09-29 12:26:18.000",
+        Hash="SHA256=" + "d" * 64,
+    )
+    adaptation = adapt_json_event(raw)
+    assert "file-create-stream-hash" in adaptation.unsupported_reason
+    events, report = parse_payload(json.dumps(raw))
+    assert events == []
+    assert report["ignored"] == 1
+    assert report["invalid"] == 0
+
+
+def test_task15_without_hash_still_fails_closed():
+    raw = flat_sysmon(
+        Task="15",
+        ProcessGuid=PROCESS_GUID,
+        Image=r"C:\Windows\System32\browser.exe",
+        TargetFilename=r"C:\Users\user\Downloads\file.bin:Zone.Identifier",
+        CreationUtcTime="2026-09-29 12:26:18.000",
+    )
+    adaptation = adapt_json_event(raw)
+    assert adaptation.unsupported_reason == ""
+    with pytest.raises(InvalidEvent, match="after compatibility adapters"):
+        normalize({"_raw": json.dumps(raw)}, "json")
+
+
 def test_known_unsupported_task_without_signature_remains_malformed():
     raw = flat_sysmon(Task="7", ImageLoaded=r"C:\Windows\System32\library.dll")
     adaptation = adapt_json_event(raw)
