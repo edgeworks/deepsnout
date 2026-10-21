@@ -164,10 +164,8 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     backlog = max(0, latest - start)
                     catching_up = backlog > settings.window * 2
                     ceiling = max(settings.window, settings.catchup_window) if catching_up else settings.window
-                    if tuning.get("span_profile") == settings.search_profile:
-                        preferred_span = int(tuning.get("span", settings.window) or settings.window)
-                    else:
-                        preferred_span = settings.window
+                    spans = dict(tuning.get("spans") or {})
+                    preferred_span = int(spans.get(settings.search_profile, settings.window) or settings.window)
                     preferred_span = max(1, min(ceiling, preferred_span))
                     end = min(latest, start + preferred_span)
                     if start >= end:
@@ -182,9 +180,10 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                         int(result.get("received", 0)), settings.max_events,
                         int(result.get("slice_attempts", 1)))
                     poll_tuning = dict(tuning)
+                    learned_spans = dict(poll_tuning.get("spans") or {})
+                    learned_spans[settings.search_profile] = next_span
                     poll_tuning.update({
-                        "span": next_span,
-                        "span_profile": settings.search_profile,
+                        "spans": learned_spans,
                         "updated_at": now(),
                     })
                     if configured_profile == "auto" and settings.search_profile == "broad":
