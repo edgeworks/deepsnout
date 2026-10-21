@@ -40,7 +40,7 @@ def test_pagination_and_index_time_scope():
     events,report=client.query(100,200)
     assert len(events)==1201 and report['invalid']==0
     requests=[r for r in seen if r.url.path.endswith('/results')]
-    assert [r.url.params['offset'] for r in requests]==['0','500','1000']
+    assert [r.url.params['offset'] for r in requests]==['0','1000']
     params=parse_qs(seen[0].content.decode())
     assert '_indextime >= 100 AND _indextime < 200' in params['search'][0]
     assert 'max_count' in params and params['earliest_time']==['0']
@@ -128,6 +128,19 @@ def test_other_sysmon_types_counted():
     assert not events and report['ignored']==1; client.close()
 
 
+def test_cribl_search_profile_pushes_supported_scope_to_splunk():
+    client,seen=client_for([{'_raw':json.dumps(raw_event()),'index':'wef'}])
+    client.settings.search_profile='cribl_flat_sysmon'
+    events,report=client.query(100,200)
+    params=parse_qs(seen[0].content.decode())
+    search=params['search'][0]
+    assert '| spath input=_raw path=Task output=__ds_task' in search
+    assert 'PROCESS_CREATE' in search and 'DNS_QUERY' in search
+    assert report['search_profile']=='cribl_flat_sysmon'
+    assert len(events)==1
+    client.close()
+
+
 def test_overload_bisects_without_losing_tail(monkeypatch):
     client,_=client_for([]); tried=[]
     def query(start,end):
@@ -135,7 +148,9 @@ def test_overload_bisects_without_losing_tail(monkeypatch):
         if end-start>2: raise TooManyEvents('test')
         return [],{'received':0}
     monkeypatch.setattr(client,'query',query)
-    assert client.slice(100,108)[2]==102 and tried==[(100,108),(100,104),(100,102)]
+    events,report,end=client.slice(100,108)
+    assert end==102 and tried==[(100,108),(100,104),(100,102)]
+    assert report['slice_attempts']==3 and report['requested_span']==8 and report['effective_span']==2
     monkeypatch.setattr(client,'query',lambda *_: (_ for _ in ()).throw(TooManyEvents('test')))
     with pytest.raises(SplunkError,match='one indexed second'): client.slice(100,101)
     client.close()
@@ -198,6 +213,10 @@ def test_json_format_and_pin_validation():
         SplunkSettings(url='https://host',indexes='wef',tls_mode='pinned')
     with pytest.raises(ValueError):
         SplunkSettings(url='https://host',indexes='wef',event_format='evtx')
+    defaults=SplunkSettings(url='https://host',indexes='wef')
+    assert defaults.search_profile=='auto' and defaults.catchup_window==900
+    with pytest.raises(ValueError):
+        SplunkSettings(url='https://host',indexes='wef',search_profile='unsafe-spl')
 
 
 def test_peer_fingerprint_from_tls_stream():
