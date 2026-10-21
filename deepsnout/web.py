@@ -421,7 +421,12 @@ def create_app(config=None):
             values=(SplunkSettings.model_validate(source.config).model_dump() if source
                     else SplunkSettings(url="",indexes="placeholder").model_dump())
             if not source: values["indexes"]=""
-            return view(request,"sources.html",user=user,rows=db.scalars(select(Source)).all(),source=source,values=values)
+            rows=db.scalars(select(Source)).all()
+            tunings={}
+            for row in rows:
+                state=db.get(State,"splunk_tuning:"+row.id)
+                tunings[row.id]=dict(state.value) if state and isinstance(state.value,dict) else {}
+            return view(request,"sources.html",user=user,rows=rows,source=source,values=values,tunings=tunings)
 
     @app.post("/sources/save")
     async def save_source(request: Request):
