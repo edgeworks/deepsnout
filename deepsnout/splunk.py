@@ -22,6 +22,7 @@ class SplunkSettings(BaseModel):
     indexes: str
     sourcetype: str = "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
     event_format: str = "auto"
+    search_profile: str = "auto"
     computer_pattern: str = "*"
     default_cohort: str = "unassigned"
     auth_scheme: str = "Bearer"
@@ -30,6 +31,7 @@ class SplunkSettings(BaseModel):
     ca_pem: str = ""
     interval: int = Field(60, ge=15, le=3600)
     window: int = Field(60, ge=1, le=3600)
+    catchup_window: int = Field(900, ge=1, le=3600)
     lag: int = Field(60, ge=10, le=3600)
     lookback: int = Field(3600, ge=60, le=7776000)
     max_events: int = Field(20000, ge=100, le=100000)
@@ -72,6 +74,14 @@ class SplunkSettings(BaseModel):
         value = value.lower().strip()
         if value not in EVENT_FORMATS:
             raise ValueError("Select Auto, XML or JSON event payload format")
+        return value
+
+    @field_validator("search_profile")
+    @classmethod
+    def profile(cls, value):
+        value = value.lower().strip()
+        if value not in {"auto", "broad", "cribl_flat_sysmon"}:
+            raise ValueError("Select Auto, broad, or Cribl flat Sysmon search profile")
         return value
 
     @field_validator("auth_scheme")
@@ -145,6 +155,37 @@ class TooManyEvents(SplunkError):
 
 def boolish(v):
     return str(v).lower() in {"1", "true"}
+
+
+RESULT_PAGE_SIZE = 1000
+SEARCH_STATUS_INTERVAL = 0.5
+
+
+def _search_profile_clause(profile):
+    """Return only hard-coded, non-user-controlled SPL fragments.
+
+    The optimized Cribl profile mirrors the compatibility adapter: supported
+    Sysmon families may be identified by explicit EventID/EventCode, the observed
+    flat Task values 1/3/22, or the supported symbolic ID values. Core parsing
+    still validates every returned event, so this is a transport optimization,
+    not an alternate event parser.
+    """
+    if profile != "cribl_flat_sysmon":
+        return ""
+    return (
+        '| spath input=_raw path=Task output=__ds_task '
+        '| spath input=_raw path=EventID output=__ds_eventid '
+        '| spath input=_raw path=EventCode output=__ds_eventcode '
+        '| spath input=_raw path=ID output=__ds_id '
+        '| eval __ds_task=replace(__ds_task,"\\'",""), '
+        '__ds_eventid=replace(__ds_eventid,"\\'",""), '
+        '__ds_eventcode=replace(__ds_eventcode,"\\'",""), '
+        '__ds_id=upper(replace(__ds_id,"\\'","")) '
+        '| where in(__ds_task,"1","3","22") '
+        'OR in(__ds_eventid,"1","3","22") '
+        'OR in(__ds_eventcode,"1","3","22") '
+        'OR in(__ds_id,"PROCESS_CREATE","NETWORK_CONNECT","DNS_QUERY") '
+    )
 
 
 def _diagnostic_text(value, limit=600):
@@ -463,7 +504,8 @@ class SplunkClient:
         search = (f'search ({indexes}) sourcetype="{cfg.sourcetype}" '
             f'_index_earliest={start} _index_latest={end} '
             f'| where _indextime >= {start} AND _indextime < {end} '
-            '| fields _raw _time _indextime index sourcetype source host splunk_server _cd')
+            + _search_profile_clause(cfg.search_profile)
+            + '| fields _raw _time _indextime index sourcetype source host splunk_server _cd')
         job = self.request("POST", "/services/search/jobs", {"search": search,
             "earliest_time": "0", "latest_time": "+10y", "output_mode": "json",
             "exec_mode": "normal", "max_count": str(cfg.max_events + 1)})
@@ -488,7 +530,7 @@ class SplunkClient:
                     break
                 if time.monotonic() >= deadline:
                     raise SplunkError("Splunk search timed out; checkpoint was not advanced")
-                self.sleep(1)
+                self.sleep(SEARCH_STATUS_INTERVAL)
                 self._operation_guard()
             if "resultCount" not in status:
                 raise SplunkError("Completed search did not report resultCount; refusing to advance")
@@ -503,15 +545,18 @@ class SplunkClient:
             events, report = [], {"received": count, "invalid": 0, "ignored": 0,
                                   "filtered_by_computer": 0, "diagnostic_groups": [],
                                   "index_time_start": start, "index_time_end": end,
-                                  "malformed_tolerance": cfg.malformed_tolerance}
+                                  "malformed_tolerance": cfg.malformed_tolerance,
+                                  "search_profile": cfg.search_profile}
             diagnostic_lookup = {}
+            profile_supported = 0
+            profile_cribl = 0
             offset = 0
             while offset < count:
                 self._operation_guard()
                 if time.monotonic() >= deadline:
                     raise SplunkError("Result retrieval timed out; checkpoint was not advanced")
                 page = self.request("GET", "/services/search/v2/jobs/" + quote(sid, safe="") + "/results",
-                    {"output_mode": "json", "count": str(min(500, count - offset)), "offset": str(offset)})
+                    {"output_mode": "json", "count": str(min(RESULT_PAGE_SIZE, count - offset)), "offset": str(offset)})
                 if boolish(page.get("preview", False)):
                     raise SplunkError("Preview results are not a complete search result")
                 records = page.get("results", [])
@@ -520,6 +565,9 @@ class SplunkClient:
                 for index, row in enumerate(records):
                     try:
                         event = normalize(row, cfg.event_format)
+                        profile_supported += 1
+                        if any("cribl-flat-sysmon" in warning for warning in getattr(event, "warnings", ())):
+                            profile_cribl += 1
                         if fnmatch.fnmatchcase(event.host, cfg.computer_pattern):
                             events.append(event)
                         else:
@@ -531,6 +579,10 @@ class SplunkClient:
                         _record_diagnostic_group(report, diagnostic_lookup,
                             offset + index + 1, row, exc)
                 offset += len(records)
+            report["supported_parsed"] = profile_supported
+            report["cribl_adapter_supported"] = profile_cribl
+            if profile_supported:
+                report["cribl_adapter_fraction"] = round(profile_cribl / profile_supported, 4)
             if report["invalid"] > cfg.malformed_tolerance:
                 report["diagnostic_note"] = (
                     "Malformed records are grouped by parser-failure signature (up to 50 groups), with counts and up to "
@@ -555,10 +607,16 @@ class SplunkClient:
                 pass
 
     def slice(self, start, end):
+        requested_end = end
+        attempts = 0
         while True:
             self._operation_guard()
+            attempts += 1
             try:
                 events, report = self.query(start, end)
+                report["slice_attempts"] = attempts
+                report["requested_span"] = requested_end - start
+                report["effective_span"] = end - start
                 return events, report, end
             except TooManyEvents:
                 if end - start <= 1:
