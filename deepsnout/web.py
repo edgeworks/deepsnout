@@ -418,7 +418,8 @@ def create_app(config=None):
     def sources(request: Request,edit: str=""):
         with transaction(engine) as db:
             user=login_user(request,db,{"admin"}); source=db.get(Source,edit) if edit else None
-            values=source.config if source else SplunkSettings(url="",indexes="placeholder").model_dump()
+            values=(SplunkSettings.model_validate(source.config).model_dump() if source
+                    else SplunkSettings(url="",indexes="placeholder").model_dump())
             if not source: values["indexes"]=""
             return view(request,"sources.html",user=user,rows=db.scalars(select(Source)).all(),source=source,values=values)
 
