@@ -120,6 +120,44 @@ Explicit JSON/XML mode is useful during a pilot because an unexpected upstream
 serialization change becomes a visible source failure instead of a silent format
 switch.
 
+### Search profiles and catch-up
+
+The **Search profile** controls whether Splunk returns the entire configured
+sourcetype slice or only records that can represent DeepSnout's currently supported
+Sysmon families.
+
+- **Auto** is the default for new and existing sources. It begins with a broad
+  slice. When at least 20 successfully parsed supported events show that at least
+  90% used the verified `cribl-flat-sysmon` compatibility inference, DeepSnout
+  records that source-specific observation and uses the optimized Cribl profile on
+  following polls. At least once every 24 hours it deliberately runs broad again
+  to revalidate the assumption. If the broad sample is large enough and no longer
+  matches, Auto falls back to broad.
+- **Broad / compatibility-first** preserves the previous behavior and performs no
+  source-side event-family prefilter.
+- **Cribl flat Sysmon (optimized)** explicitly enables the verified pilot profile.
+
+The optimized Cribl profile does not trust `Task` as a universal EventID. It is a
+hard-coded transport optimization for the already verified flat-Cribl dialect: the
+Splunk search extracts top-level `Task`, `EventID`, `EventCode` and symbolic
+`ID`, retains candidate Event 1/3/22 records, and then the normal DeepSnout parser
+still performs the full provider/payload validation. No operator-provided SPL is
+inserted.
+
+Catch-up also uses a learned slice duration. `window` remains the normal near-live
+slice (60 seconds by default). While substantially behind, DeepSnout may grow the
+slice up to `catchup_window` (900 seconds by default). Low result utilization grows
+the next slice; a high result count or a result-cap bisection shrinks it toward
+roughly 65% of the configured cap. Learned durations are kept separately for broad
+and optimized searches. This avoids repeating 60→30→15-style over-cap probes on
+every poll.
+
+Automatic peer-group refreshes are deferred while any enabled Splunk source is
+catching up. Operator-queued work still takes priority over automatic catch-up.
+Poll job results expose the requested/effective slice, backlog before/after, next
+learned span, effective search profile, wall time, and index-seconds processed per
+wall-second.
+
 Choose **Bearer** for a Splunk authentication token and **Splunk** for a session
 key. Credentials are encrypted and never redisplayed. Long-running sources should
 normally use a dedicated Bearer authentication token rather than a manually
@@ -167,15 +205,16 @@ Save paused, Test connection, Poll now, inspect job report/Operations, then Enab
 Server test does not prove all search permissions or parser compatibility. First
 check original endpoint identity vs collector identity and missing-GUID counts.
 
-Default initial index-time lookback is one hour, maximum slice 60s, polling 60s,
-and lag 60s. Backlog slices run successively until caught up. Earlier original
-events within retention build the reference; only recent events produce findings.
-Use a limited sample before increasing scope or history.
+Default initial index-time lookback is one hour, normal slice 60s, maximum
+catch-up slice 900s, polling 60s, and lag 60s. Backlog slices run successively
+without waiting for the normal polling interval and adapt their duration to result
+density. Earlier original events within retention build the reference; only recent
+events produce findings. Use a limited sample before increasing scope or history.
 
 ## Search guarantees and limits
 
 Create/status/delete: `/services/search/jobs`. Results:
-`/services/search/v2/jobs/{sid}/results`, pages of up to 500. The completed job
+`/services/search/v2/jobs/{sid}/results`, pages of up to 1,000. The completed job
 must report resultCount. Recognized warnings/errors, preview pages, early
 finalization, missing results or malformed supported events fail the slice. No
 cursor advance occurs on failure. Unsupported event types and recognized
@@ -189,10 +228,11 @@ schema/candidate/adapter diagnostics plus a raw SHA-256 for source lookup.
 
 Index-time scopes are half-open and explicitly checked using `_indextime`.
 Original UtcTime/SystemTime/TimeCreated drives comparison. Over-cap slices are
-bisected, never silently truncated. If one indexed second exceeds the configured
-cap, the job fails until scope/cap is adjusted. A finished result can still be
-incomplete due to conditions the server does not report; this is not a collection
-certification.
+shrunk from their start boundary, never silently truncated; the successful span is
+remembered so the following poll does not blindly retry the same oversized window.
+If one indexed second exceeds the configured cap, the job fails until scope/cap is
+adjusted. A finished result can still be incomplete due to conditions the server
+does not report; this is not a collection certification.
 
 The lag accommodates ordinary indexing/search visibility delay, not arbitrarily
 late distributed-search visibility. After an outage, assess lag and deliberately
