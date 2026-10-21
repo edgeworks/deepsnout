@@ -1,5 +1,6 @@
 """Durable jobs with a single analysis coordinator and transactional checkpoints."""
 import contextlib
+from dataclasses import replace
 import fcntl
 import logging
 import time
@@ -16,6 +17,10 @@ from .demo import fixtures
 LOG = logging.getLogger("deepsnout.worker")
 ACTIVE_JOB_STATUSES = ("queued", "running", "cancel_requested")
 POLL_WALL_BUDGET = 900
+CATCHUP_BATCH_MAX_SLICES = 4
+CATCHUP_BATCH_MAX_EVENTS = 50000
+CATCHUP_COLLECTION_BUDGET = 420
+LIVE_FINDING_HORIZON = 86400
 PROFILE_AUDIT_INTERVAL = 86400
 AUTO_PROFILE_MIN_SUPPORTED = 20
 AUTO_PROFILE_MIN_FRACTION = 0.90
@@ -41,6 +46,36 @@ def _next_slice_span(current_span, ceiling, received, maximum, attempts):
     if fill < 0.45 and current_span < ceiling:
         return min(ceiling, max(current_span + 1, current_span * 2))
     return min(current_span, ceiling)
+
+
+def _combine_slice_reports(reports):
+    if not reports:
+        return {}
+    combined = dict(reports[-1])
+    additive = (
+        "received", "invalid", "ignored", "filtered_by_computer",
+        "supported_parsed", "cribl_adapter_supported", "tolerated_malformed",
+    )
+    for key in additive:
+        combined[key] = sum(int(report.get(key, 0) or 0) for report in reports)
+    combined["slice_attempts"] = sum(int(report.get("slice_attempts", 1) or 1) for report in reports)
+    combined["requested_span"] = sum(int(report.get("requested_span", 0) or 0) for report in reports)
+    combined["effective_span"] = sum(int(report.get("effective_span", 0) or 0) for report in reports)
+    supported = combined.get("supported_parsed", 0)
+    cribl = combined.get("cribl_adapter_supported", 0)
+    if supported:
+        combined["cribl_adapter_fraction"] = round(cribl / supported, 4)
+    combined["catchup_sub_slices"] = [
+        {
+            "index_time_start": report.get("index_time_start"),
+            "index_time_end": report.get("index_time_end"),
+            "received": report.get("received", 0),
+            "slice_attempts": report.get("slice_attempts", 1),
+            "effective_span": report.get("effective_span", 0),
+        }
+        for report in reports
+    ]
+    return combined
 
 
 def _cancel_requested(engine, job_id):
@@ -167,18 +202,37 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     spans = dict(tuning.get("spans") or {})
                     preferred_span = int(spans.get(settings.search_profile, settings.window) or settings.window)
                     preferred_span = max(1, min(ceiling, preferred_span))
+                    collection_started = time.monotonic()
                     end = min(latest, start + preferred_span)
                     if start >= end:
                         records, next_checkpoint = [], start
                         result = {"received": 0, "slice_attempts": 1, "effective_span": 0,
                                   "requested_span": 0, "search_profile": settings.search_profile}
+                        next_span = preferred_span
                     else:
-                        records, result, next_checkpoint = client.slice(start, end)
+                        records, slice_report, next_checkpoint = client.slice(start, end)
+                        reports = [slice_report]
+                        last_span = max(1, next_checkpoint - start)
+                        next_span = _next_slice_span(
+                            last_span, ceiling, int(slice_report.get("received", 0)),
+                            settings.max_events, int(slice_report.get("slice_attempts", 1)))
+                        multi_slice = catching_up and settings.search_profile == "cribl_flat_sysmon"
+                        while (multi_slice and next_checkpoint < latest
+                                and len(reports) < CATCHUP_BATCH_MAX_SLICES
+                                and len(records) < CATCHUP_BATCH_MAX_EVENTS
+                                and time.monotonic() - collection_started < CATCHUP_COLLECTION_BUDGET):
+                            sub_start = next_checkpoint
+                            sub_end = min(latest, sub_start + next_span)
+                            more, sub_report, next_checkpoint = client.slice(sub_start, sub_end)
+                            records.extend(more)
+                            reports.append(sub_report)
+                            last_span = max(1, next_checkpoint - sub_start)
+                            next_span = _next_slice_span(
+                                last_span, ceiling, int(sub_report.get("received", 0)),
+                                settings.max_events, int(sub_report.get("slice_attempts", 1)))
+                        result = _combine_slice_reports(reports)
+                    result["collection_seconds"] = round(time.monotonic() - collection_started, 3)
                     actual_span = max(0, next_checkpoint - start)
-                    next_span = _next_slice_span(
-                        max(1, actual_span or preferred_span), ceiling,
-                        int(result.get("received", 0)), settings.max_events,
-                        int(result.get("slice_attempts", 1)))
                     poll_tuning = dict(tuning)
                     learned_spans = dict(poll_tuning.get("spans") or {})
                     learned_spans[settings.search_profile] = next_span
@@ -227,11 +281,33 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                 if source.config != snapshot["config"] or source.credential != snapshot["credential"]:
                     raise ValueError("Source configuration changed during job; retry with the new configuration")
             if records is not None:
-                result = {**result, **ingest(db, records,
+                ingest_clock = now()
+                historical_batch = bool(records) and max(event.ts for event in records) < ingest_clock - LIVE_FINDING_HORIZON
+                historical_guid_count = 0
+                ingest_records = records
+                if historical_batch:
+                    historical_guid_count = sum(bool(event.guid) for event in records)
+                    if historical_guid_count:
+                        ingest_records = [replace(event, guid="") if event.guid else event for event in records]
+                ingest_started = time.monotonic()
+                ingest_report = ingest(db, ingest_records,
                     namespace=snapshot["namespace"] if snapshot else payload.get("namespace", "default"),
-                    batch_id=payload.get("batch_id"),
-                    cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned")}
-                evaluate_windows(db)
+                    batch_id=payload.get("batch_id"), clock=ingest_clock,
+                    cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned")
+                if historical_batch:
+                    ingest_report["missing_guid"] = max(
+                        0, int(ingest_report.get("missing_guid", 0)) - historical_guid_count)
+                    ingest_report["historical_process_state_skipped"] = historical_guid_count
+                    ingest_report["historical_fast_path"] = "process-state-elision"
+                result = {**result, **ingest_report}
+                result["ingest_seconds"] = round(time.monotonic() - ingest_started, 3)
+                if historical_batch:
+                    result["window_evaluation_deferred"] = True
+                    result["evaluate_seconds"] = 0.0
+                else:
+                    evaluate_started = time.monotonic()
+                    result["network_findings_created"] = evaluate_windows(db, clock=ingest_clock)
+                    result["evaluate_seconds"] = round(time.monotonic() - evaluate_started, 3)
             if kind == "peer_groups":
                 result = refresh_peer_groups(db, progress=progress)
             if kind == "remove_demo":
