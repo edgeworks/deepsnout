@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a14, initial runnable pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a15, initial runnable pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -26,8 +26,14 @@ FileCreateStreamHash shape may omit `Contents`; DeepSnout recognizes it using th
 remaining stable Event 15 payload fields. No binary EVTX reader.
 - GUI-configured **Splunk search-API pull** with encrypted credentials, strict
   CA/hostname TLS by default, an explicit per-source leaf-certificate pin mode
-  for legacy management certificates, index-time checkpoints, pagination,
-  adaptive slices and failure without advancing the source cursor.
+  for legacy management certificates, index-time checkpoints and failure without
+  advancing the source cursor. Catch-up polling learns a safe slice duration per
+  source/search profile up to a 15-minute default ceiling instead of repeatedly
+  probing an oversized slice. The Auto search profile can recognize the verified
+  flat-Cribl Sysmon adapter from supported events and then push a hard-coded
+  Event 1/3/22 prefilter into Splunk; it periodically returns to a broad slice to
+  revalidate the assumption. Result pages use 1,000 rows and scheduled peer-group
+  discovery is deferred while a source is catching up.
 - Three local detectors: remote-execution characteristics; new launch contexts
   with exact-GUID-attributed outbound activity; sustained application-level
   destination-diversity changes. Findings have deterministic explanations.
