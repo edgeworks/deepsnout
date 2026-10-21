@@ -16,6 +16,31 @@ from .demo import fixtures
 LOG = logging.getLogger("deepsnout.worker")
 ACTIVE_JOB_STATUSES = ("queued", "running", "cancel_requested")
 POLL_WALL_BUDGET = 900
+PROFILE_AUDIT_INTERVAL = 86400
+AUTO_PROFILE_MIN_SUPPORTED = 20
+AUTO_PROFILE_MIN_FRACTION = 0.90
+TARGET_RESULT_FILL = 0.65
+
+
+def _tuning_key(source_id):
+    return "splunk_tuning:" + source_id
+
+
+def _next_slice_span(current_span, ceiling, received, maximum, attempts):
+    """Learn a useful slice duration without probing an oversized window every poll."""
+    current_span = max(1, int(current_span))
+    ceiling = max(1, int(ceiling))
+    if maximum <= 0:
+        return min(current_span, ceiling)
+    fill = received / maximum
+    if attempts > 1 or fill > 0.75:
+        if received <= 0:
+            return min(current_span, ceiling)
+        target = max(1, int(current_span * TARGET_RESULT_FILL / fill))
+        return min(ceiling, max(1, target))
+    if fill < 0.45 and current_span < ceiling:
+        return min(ceiling, max(current_span + 1, current_span * 2))
+    return min(current_span, ceiling)
 
 
 def _cancel_requested(engine, job_id):
@@ -80,8 +105,10 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         job.status, job.started, job.error = "running", now(), ""
         kind, payload = job.kind, dict(job.payload)
         source = db.get(Source, job.source_id) if job.source_id else None
+        tuning_state = db.get(State, _tuning_key(source.id)) if source else None
         snapshot = ({"id": source.id, "config": source.config, "credential": source.credential,
-                     "namespace": source.namespace, "checkpoint": source.checkpoint} if source else None)
+                     "namespace": source.namespace, "checkpoint": source.checkpoint,
+                     "tuning": dict(tuning_state.value) if tuning_state else {}} if source else None)
         started_at = job.started
 
     def progress(stage, detail=None):
@@ -101,10 +128,23 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
     progress("starting")
     try:
         records, result, next_checkpoint = None, {}, None
+        poll_tuning = None
+        poll_latest = None
         if kind in {"poll", "test"}:
             if not snapshot:
                 raise ValueError("Source no longer exists")
             settings = SplunkSettings.model_validate(snapshot["config"])
+            configured_profile = settings.search_profile
+            tuning = dict(snapshot.get("tuning") or {})
+            profile_audit = False
+            if kind == "poll" and configured_profile == "auto":
+                detected = str(tuning.get("detected_profile", ""))
+                last_audit = float(tuning.get("profile_audit_at", 0) or 0)
+                if detected == "cribl_flat_sysmon" and now() - last_audit < PROFILE_AUDIT_INTERVAL:
+                    settings.search_profile = detected
+                else:
+                    settings.search_profile = "broad"
+                    profile_audit = True
             client = client_factory(settings, crypto(config).decrypt(snapshot["credential"].encode()).decode(),
                                     allow_http=config.allow_http_connectors)
             if hasattr(client, "cancel_check"):
@@ -119,13 +159,51 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     result = client.test()
                 else:
                     latest = int(now()) - settings.lag
+                    poll_latest = latest
                     start = snapshot["checkpoint"] if snapshot["checkpoint"] is not None else latest - settings.lookback
-                    end = min(latest, start + settings.window)
+                    backlog = max(0, latest - start)
+                    catching_up = backlog > settings.window * 2
+                    ceiling = max(settings.window, settings.catchup_window) if catching_up else settings.window
+                    if tuning.get("span_profile") == settings.search_profile:
+                        preferred_span = int(tuning.get("span", settings.window) or settings.window)
+                    else:
+                        preferred_span = settings.window
+                    preferred_span = max(1, min(ceiling, preferred_span))
+                    end = min(latest, start + preferred_span)
                     if start >= end:
                         records, next_checkpoint = [], start
+                        result = {"received": 0, "slice_attempts": 1, "effective_span": 0,
+                                  "requested_span": 0, "search_profile": settings.search_profile}
                     else:
                         records, result, next_checkpoint = client.slice(start, end)
+                    actual_span = max(0, next_checkpoint - start)
+                    next_span = _next_slice_span(
+                        max(1, actual_span or preferred_span), ceiling,
+                        int(result.get("received", 0)), settings.max_events,
+                        int(result.get("slice_attempts", 1)))
+                    poll_tuning = dict(tuning)
+                    poll_tuning.update({
+                        "span": next_span,
+                        "span_profile": settings.search_profile,
+                        "updated_at": now(),
+                    })
+                    if configured_profile == "auto" and settings.search_profile == "broad":
+                        supported = int(result.get("supported_parsed", 0) or 0)
+                        fraction = float(result.get("cribl_adapter_fraction", 0) or 0)
+                        if supported >= AUTO_PROFILE_MIN_SUPPORTED:
+                            poll_tuning["detected_profile"] = (
+                                "cribl_flat_sysmon" if fraction >= AUTO_PROFILE_MIN_FRACTION else "")
+                            poll_tuning["profile_audit_at"] = now()
+                            result["auto_profile_decision"] = poll_tuning["detected_profile"] or "broad"
+                        elif profile_audit:
+                            result["auto_profile_decision"] = "insufficient-sample"
+                    result["configured_search_profile"] = configured_profile
+                    result["effective_search_profile"] = settings.search_profile
                     result["index_time_start"], result["index_time_end"] = start, next_checkpoint
+                    result["index_seconds_processed"] = actual_span
+                    result["backlog_seconds_before"] = backlog
+                    result["backlog_seconds_after"] = max(0, latest - next_checkpoint)
+                    result["adaptive_next_span"] = next_span
                     payload["batch_id"] = digest("splunk-slice", snapshot["id"], start, next_checkpoint, sorted(e.id for e in records))
             finally:
                 client.close()
@@ -179,6 +257,13 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                 source.last_success, source.last_error = now(), ""
                 if kind == "poll":
                     source.checkpoint = next_checkpoint
+                    if poll_tuning is not None:
+                        set_state(db, _tuning_key(source.id), poll_tuning)
+            if kind == "poll":
+                result["wall_seconds"] = round(now() - started_at, 3)
+                processed = float(result.get("index_seconds_processed", 0) or 0)
+                result["index_seconds_per_wall_second"] = (
+                    round(processed / result["wall_seconds"], 3) if result["wall_seconds"] > 0 else 0)
             kept_payload = {"origin": payload["origin"]} if payload.get("origin") else {}
             job.status, job.finished, job.report, job.payload = "done", now(), result, kept_payload
             audit(db, "worker", "job.completed", job.id, kind)
@@ -207,9 +292,12 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
 def tick(engine, config, guard=lambda: None):
     with transaction(engine) as db:
         set_state(db, "worker", {"heartbeat": now(), "state": "idle"})
+        catching_up_ids = []
         for source in db.scalars(select(Source).where(Source.enabled.is_(True), Source.kind == "splunk")):
             settings = SplunkSettings.model_validate(source.config)
             catching_up = source.checkpoint is not None and source.checkpoint < int(now()) - settings.lag - settings.window
+            if catching_up:
+                catching_up_ids.append(source.id)
             if (catching_up and not source.last_error) or now() - source.last_poll >= settings.interval:
                 if (db.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0) >= 20:
                     break
@@ -219,10 +307,15 @@ def tick(engine, config, guard=lambda: None):
         peer_updated = peer_state.value.get("updated_at", 0) if peer_state else 0
         peer_attempt_state = db.get(State, "peer_group_last_attempt")
         peer_attempted = peer_attempt_state.value.get("at", 0) if peer_attempt_state else 0
-        if (db.scalar(select(func.count()).select_from(Host))
+        if (not catching_up_ids and db.scalar(select(func.count()).select_from(Host))
                 and now() - max(peer_updated, peer_attempted) >= 3600):
             enqueue(db, "peer_groups", {"origin": "scheduler"})
-        job = db.scalar(select(Job).where(Job.status == "queued").order_by(Job.created).limit(1))
+        queued = db.scalars(select(Job).where(Job.status == "queued").order_by(Job.created).limit(50)).all()
+        operator_job = next((item for item in queued
+                             if isinstance(item.payload, dict) and item.payload.get("origin") == "operator"), None)
+        catchup_poll = next((item for item in queued
+                             if item.kind == "poll" and item.source_id in catching_up_ids), None)
+        job = operator_job or catchup_poll or (queued[0] if queued else None)
         job_id = job.id if job else None
     if job_id:
         run_job(engine, config, job_id, guard=guard)
