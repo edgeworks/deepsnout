@@ -177,10 +177,10 @@ def _search_profile_clause(profile):
         '| spath input=_raw path=EventID output=__ds_eventid '
         '| spath input=_raw path=EventCode output=__ds_eventcode '
         '| spath input=_raw path=ID output=__ds_id '
-        '| eval __ds_task=replace(__ds_task,"\\'",""), '
-        '__ds_eventid=replace(__ds_eventid,"\\'",""), '
-        '__ds_eventcode=replace(__ds_eventcode,"\\'",""), '
-        '__ds_id=upper(replace(__ds_id,"\\'","")) '
+        "| eval __ds_task=replace(__ds_task,\"'\",\"\"), "
+        "__ds_eventid=replace(__ds_eventid,\"'\",\"\"), "
+        "__ds_eventcode=replace(__ds_eventcode,\"'\",\"\"), "
+        "__ds_id=upper(replace(__ds_id,\"'\",\"\")) "
         '| where in(__ds_task,"1","3","22") '
         'OR in(__ds_eventid,"1","3","22") '
         'OR in(__ds_eventcode,"1","3","22") '
