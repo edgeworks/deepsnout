@@ -1,6 +1,5 @@
 """Durable jobs with a single analysis coordinator and transactional checkpoints."""
 import contextlib
-from dataclasses import replace
 import fcntl
 import logging
 import time
@@ -283,22 +282,12 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             if records is not None:
                 ingest_clock = now()
                 historical_batch = bool(records) and max(event.ts for event in records) < ingest_clock - LIVE_FINDING_HORIZON
-                historical_guid_count = 0
-                ingest_records = records
-                if historical_batch:
-                    historical_guid_count = sum(bool(event.guid) for event in records)
-                    if historical_guid_count:
-                        ingest_records = [replace(event, guid="") if event.guid else event for event in records]
                 ingest_started = time.monotonic()
-                ingest_report = ingest(db, ingest_records,
+                ingest_report = ingest(db, records,
                     namespace=snapshot["namespace"] if snapshot else payload.get("namespace", "default"),
                     batch_id=payload.get("batch_id"), clock=ingest_clock,
-                    cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned")
-                if historical_batch:
-                    ingest_report["missing_guid"] = max(
-                        0, int(ingest_report.get("missing_guid", 0)) - historical_guid_count)
-                    ingest_report["historical_process_state_skipped"] = historical_guid_count
-                    ingest_report["historical_fast_path"] = "process-state-elision"
+                    cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned",
+                    historical=historical_batch)
                 result = {**result, **ingest_report}
                 result["ingest_seconds"] = round(time.monotonic() - ingest_started, 3)
                 if historical_batch:
