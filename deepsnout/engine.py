@@ -351,8 +351,12 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                 w.samples = [*w.samples, exact]
             if not historical:
                 w.evaluated = False
-    for key, w in windows.items():
-        w.sketch, w.distinct_count = sketches[key].encode(), sketches[key].estimate()
+    # Historical preloading may include a window whose corresponding event is
+    # later skipped as duplicate/outside retention. Only windows actually touched
+    # during this batch have an in-memory Diversity sketch.
+    for key, sketch in sketches.items():
+        w = windows[key]
+        w.sketch, w.distinct_count = sketch.encode(), sketch.estimate()
     if batch_id:
         db.add(BatchReceipt(id=batch_id, namespace=namespace, received=clock))
     db.flush()
