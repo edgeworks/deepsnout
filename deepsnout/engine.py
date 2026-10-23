@@ -166,6 +166,16 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
     if historical:
         host_ids = {host_key(namespace, e.host) for e in events}
         hosts.update(_preload_by_id(db, Host, host_ids))
+        missing_hosts = {}
+        for e in events:
+            hid = host_key(namespace, e.host)
+            if hid not in hosts and hid not in missing_hosts:
+                missing_hosts[hid] = Host(id=hid, name=e.host, namespace=namespace,
+                    first_seen=e.ts, last_seen=e.ts, cohort=cohort)
+                db.add(missing_hosts[hid])
+        if missing_hosts:
+            db.flush()
+            hosts.update(missing_hosts)
         coverage_ids = {
             digest(host_key(namespace, e.host), int(e.ts) // DAY, e.event_id)
             for e in events
