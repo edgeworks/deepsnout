@@ -62,6 +62,13 @@ non-Sysmon Windows provider in a mixed sourcetype remains ignored rather than be
 interpreted with Sysmon rules. The core parser does not treat generic `ID`/`id` or
 `Task` as EventID.
 
+Historical catch-up regressions verify that batches older than the 24-hour
+execution-finding horizon do not call the per-context reference() path, do not
+retain temporary ProcessGuid state, and still create BehaviorDay baseline state.
+The historical engine preloads existing host/coverage/behavior/window rows in
+bounded ID chunks and flushes newly discovered hosts before dependent summaries,
+so SQLite and PostgreSQL preserve foreign-key integrity.
+
 Splunk catch-up regressions now cover hard-coded Cribl Event 1/3/22
 search-profile pushdown, 1,000-row result pagination, adaptive slice metadata,
 result-density span learning, and Auto profile promotion after a sufficiently large
