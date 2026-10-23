@@ -33,7 +33,9 @@ remaining stable Event 15 payload fields. No binary EVTX reader.
   flat-Cribl Sysmon adapter from supported events and then push a hard-coded
   Event 1/3/22 prefilter into Splunk; it periodically returns to a broad slice to
   revalidate the assumption. Result pages use 1,000 rows and scheduled peer-group
-  discovery is deferred while a source is catching up.
+  discovery is deferred while a source is catching up. Historical catch-up older
+  than the live finding horizon uses bulk baseline prefetching and skips temporary
+  ProcessGuid/reference work that cannot create a current finding.
 - Three local detectors: remote-execution characteristics; new launch contexts
   with exact-GUID-attributed outbound activity; sustained application-level
   destination-diversity changes. Findings have deterministic explanations.
