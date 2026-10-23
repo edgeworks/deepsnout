@@ -1,10 +1,12 @@
 from sqlalchemy import select
 
 from conftest import CLOCK, evt
-from deepsnout.db import BehaviorDay, Job, Process, Source, State, transaction
+from deepsnout.db import BehaviorDay, Host, Job, Process, Source, State, Window, transaction
 from deepsnout.security import crypto
 from deepsnout.splunk import SplunkSettings
 from deepsnout.worker import enqueue, run_job
+from deepsnout.engine import DAY, WINDOW, host_key, ingest
+from deepsnout.normalize import digest
 
 
 def _source(engine, config, checkpoint, profile="cribl_flat_sysmon"):
@@ -53,6 +55,24 @@ def test_optimized_catchup_batches_adjacent_slices(engine, config):
         assert job.report["index_seconds_processed"] > 60
         assert job.report["collection_seconds"] >= 0
         assert db.get(Source, source_id).checkpoint == calls[-1][1]
+
+
+def test_historical_preloaded_window_skipped_by_retention_does_not_keyerror(engine):
+    event = evt(3, n=9901, ts=CLOCK - 40 * DAY)
+    hid = host_key("test", event.host)
+    start = int(event.ts) // WINDOW * WINDOW
+    wkey = digest(hid, event.app, event.location, "ip", start)
+    with transaction(engine) as db:
+        db.add(Host(id=hid, name=event.host, namespace="test",
+                    first_seen=event.ts, last_seen=event.ts, cohort="unassigned"))
+        db.add(Window(id=wkey, host_id=hid, app=event.app, location=event.location,
+                      kind="ip", start=start, count=1, sketch="", samples=["8.8.8.8"],
+                      reference_ok=True, evaluated=True))
+    with transaction(engine) as db:
+        report = ingest(db, [event], namespace="test", clock=CLOCK, historical=True)
+        assert report["outside_retention"] == 1
+        assert report["accepted"] == 0
+        assert db.get(Window, wkey) is not None
 
 
 def test_historical_poll_skips_reference_queries_and_process_state(engine, config, monkeypatch):
