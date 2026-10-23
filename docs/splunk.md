@@ -158,6 +158,16 @@ Poll job results expose the requested/effective slice, backlog before/after, nex
 learned span, effective search profile, wall time, and index-seconds processed per
 wall-second.
 
+Historical catch-up older than the 24-hour execution-finding horizon uses a
+dedicated baseline-ingestion fast path. It bulk-prefetches existing hosts, coverage,
+behavior summaries and network windows, skips ProcessGuid correlation state, skips
+per-context reference() queries, and inserts new BehaviorDay summaries directly.
+Those omitted calculations cannot produce a current execution finding for events
+that old. Coverage, deduplication receipts, BehaviorDay history and network-window
+summaries are still retained transactionally for later baseline and peer analysis.
+The job report exposes `historical_reference_queries_skipped` and
+`historical_process_state_skipped` so the optimization remains visible.
+
 Choose **Bearer** for a Splunk authentication token and **Splunk** for a session
 key. Credentials are encrypted and never redisplayed. Long-running sources should
 normally use a dedicated Bearer authentication token rather than a manually
