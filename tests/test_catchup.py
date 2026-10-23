@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from conftest import CLOCK, evt
-from deepsnout.db import Job, Process, Source, State, transaction
+from deepsnout.db import BehaviorDay, Job, Process, Source, State, transaction
 from deepsnout.security import crypto
 from deepsnout.splunk import SplunkSettings
 from deepsnout.worker import enqueue, run_job
@@ -55,8 +55,12 @@ def test_optimized_catchup_batches_adjacent_slices(engine, config):
         assert db.get(Source, source_id).checkpoint == calls[-1][1]
 
 
-def test_historical_poll_does_not_keep_temporary_process_state(engine, config):
+def test_historical_poll_skips_reference_queries_and_process_state(engine, config, monkeypatch):
     _, job_id = _source(engine, config, CLOCK - 3 * 86400)
+    import deepsnout.engine as engine_module
+    def unexpected_reference(*args, **kwargs):
+        raise AssertionError("reference() must not run for historical catch-up")
+    monkeypatch.setattr(engine_module, "reference", unexpected_reference)
 
     class Client:
         def __init__(self, settings, *args, **kwargs):
@@ -80,8 +84,10 @@ def test_historical_poll_does_not_keep_temporary_process_state(engine, config):
     assert run_job(engine, config, job_id, client_factory=Client)
     with transaction(engine) as db:
         job = db.get(Job, job_id)
-        assert job.report["historical_fast_path"] == "process-state-elision"
+        assert job.report["historical_fast_path"] == "reference-and-state-elision"
         assert job.report["historical_process_state_skipped"] >= 1
+        assert job.report["historical_reference_queries_skipped"] >= 1
         assert job.report["window_evaluation_deferred"] is True
         assert job.report["ingest_seconds"] >= 0
         assert db.scalar(select(Process)) is None
+        assert db.scalar(select(BehaviorDay)) is not None
