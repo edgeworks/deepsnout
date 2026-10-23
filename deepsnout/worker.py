@@ -336,8 +336,15 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         from .engine import CapacityError
         message = str(exc)[:600] if isinstance(exc, (SplunkError, CapacityError, ValueError)) else type(exc).__name__ + ": inspect worker logs"
         failure_report = exc.report if isinstance(exc, SplunkError) and exc.report else {}
-        LOG.error("Job %s failed kind=%s type=%s runtime=%.1fs message=%s",
-                  job_id, kind, type(exc).__name__, now() - started_at, message)
+        if isinstance(exc, (SplunkError, CapacityError, ValueError)):
+            LOG.error("Job %s failed kind=%s type=%s runtime=%.1fs message=%s",
+                      job_id, kind, type(exc).__name__, now() - started_at, message)
+        else:
+            # Unexpected exceptions need a traceback in container logs. Standard
+            # Python tracebacks do not include local variable values, so this
+            # improves diagnosis without dumping event payloads or credentials.
+            LOG.exception("Job %s failed kind=%s type=%s runtime=%.1fs",
+                          job_id, kind, type(exc).__name__, now() - started_at)
         with transaction(engine) as db:
             job = db.get(Job, job_id)
             if job.status == "cancel_requested":
