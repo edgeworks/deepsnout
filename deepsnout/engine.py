@@ -128,11 +128,22 @@ def execution_findings(db, host, process, cfg, clock):
             "then initiated an external connection attributed to the same ProcessGuid.", sample)
 
 
-def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="unassigned"):
+def _preload_by_id(db, model, ids, chunk=500):
+    rows = {}
+    values = list(ids)
+    for offset in range(0, len(values), chunk):
+        for row in db.scalars(select(model).where(model.id.in_(values[offset:offset + chunk]))):
+            rows[row.id] = row
+    return rows
+
+
+def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="unassigned", historical=False):
     clock = now() if clock is None else clock
     cfg = policy(db)
     report = {"accepted": 0, "duplicates": 0, "outside_retention": 0,
-              "future": 0, "context_limit": 0, "missing_guid": 0, "warnings": 0}
+              "future": 0, "context_limit": 0, "missing_guid": 0, "warnings": 0,
+              "historical_process_state_skipped": 0,
+              "historical_reference_queries_skipped": 0}
     if batch_id and db.get(BatchReceipt, batch_id):
         report["duplicates"], report["batch_replay"] = len(events), True
         return report
@@ -146,10 +157,47 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                             "The batch/checkpoint was not committed.")
     hosts, processes, coverage, behaviors, windows, sketches = {}, {}, {}, {}, {}, {}
     refs, context_counts = {}, {}
+    historical_ref_keys = set()
     ids = [digest(namespace, e.id) for e in events]
     known = set()
     for offset in range(0, len(ids), 500):
         known.update(db.scalars(select(Seen.id).where(Seen.id.in_(ids[offset:offset + 500]))))
+
+    if historical:
+        host_ids = {host_key(namespace, e.host) for e in events}
+        hosts.update(_preload_by_id(db, Host, host_ids))
+        coverage_ids = {
+            digest(host_key(namespace, e.host), int(e.ts) // DAY, e.event_id)
+            for e in events
+        }
+        coverage.update(_preload_by_id(db, Coverage, coverage_ids))
+
+        behavior_ids = set()
+        host_days = set()
+        window_ids = set()
+        for e in events:
+            hid = host_key(namespace, e.host)
+            day = int(e.ts) // DAY
+            if e.event_id == 1:
+                behavior_ids.add(digest(hid, day, execution_context(e)))
+                host_days.add((hid, day))
+            elif e.event_id == 3 and e.initiated is True and ipaddress.ip_address(e.destination).is_global:
+                start = int(e.ts) // WINDOW * WINDOW
+                window_ids.add(digest(hid, e.app, e.location, "ip", start))
+            elif e.event_id == 22 and "." in e.query:
+                start = int(e.ts) // WINDOW * WINDOW
+                window_ids.add(digest(hid, e.app, e.location, "domain", start))
+        behaviors.update(_preload_by_id(db, BehaviorDay, behavior_ids))
+        windows.update(_preload_by_id(db, Window, window_ids))
+        if host_days:
+            host_values = {item[0] for item in host_days}
+            day_values = {item[1] for item in host_days}
+            for hid, day, count in db.execute(
+                    select(BehaviorDay.host_id, BehaviorDay.day, func.count())
+                    .where(BehaviorDay.host_id.in_(host_values), BehaviorDay.day.in_(day_values))
+                    .group_by(BehaviorDay.host_id, BehaviorDay.day)):
+                context_counts[(hid, day)] = count
+        report["historical_fast_path"] = "reference-and-state-elision"
     for e in sorted(events, key=lambda x: (x.ts, x.event_id != 1)):
         receipt = digest(namespace, e.id)
         if receipt in known:
@@ -165,18 +213,19 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
         db.add(Seen(id=receipt, namespace=namespace, received=clock))
         hid = host_key(namespace, e.host)
         if hid not in hosts:
-            hosts[hid] = db.get(Host, hid)
+            hosts[hid] = None if historical else db.get(Host, hid)
             if hosts[hid] is None:
                 hosts[hid] = Host(id=hid, name=e.host, namespace=namespace,
                                   first_seen=e.ts, last_seen=e.ts, cohort=cohort)
                 db.add(hosts[hid])
-                db.flush()
+                if not historical:
+                    db.flush()
         host = hosts[hid]
         host.first_seen, host.last_seen = min(host.first_seen, e.ts), max(host.last_seen, e.ts)
         day = int(e.ts) // DAY
         ckey = digest(hid, day, e.event_id)
         if ckey not in coverage:
-            coverage[ckey] = db.get(Coverage, ckey)
+            coverage[ckey] = None if historical else db.get(Coverage, ckey)
             if coverage[ckey] is None:
                 coverage[ckey] = Coverage(id=ckey, host_id=hid, day=day, event_id=e.event_id, count=0)
                 db.add(coverage[ckey])
@@ -185,7 +234,7 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
         report["warnings"] += len(e.warnings)
         report["missing_guid"] += int(not e.guid)
         proc = None
-        if e.guid:
+        if e.guid and not historical:
             pkey = digest(hid, e.guid)
             if pkey not in processes:
                 processes[pkey] = db.get(Process, pkey)
@@ -195,25 +244,36 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                     db.add(processes[pkey])
             proc = processes[pkey]
             proc.last_seen = max(proc.last_seen, e.ts)
+        elif e.guid:
+            report["historical_process_state_skipped"] += 1
         if e.event_id == 1:
             ctx = execution_context(e)
             rkey = (hid, ctx, day)
-            if rkey not in refs:
-                refs[rkey] = reference(db, host, ctx, e.app, e.ts, cfg)
+            if historical:
+                if rkey not in historical_ref_keys:
+                    historical_ref_keys.add(rkey)
+                    report["historical_reference_queries_skipped"] += 1
+                ref = {"historical_backfill": True, "reference_days": cfg.baseline_days,
+                       "reference_before": day * DAY}
+            else:
+                if rkey not in refs:
+                    refs[rkey] = reference(db, host, ctx, e.app, e.ts, cfg)
+                ref = refs[rkey]
             sample = {"image": e.image, "sha256": e.sha256, "parent": e.parent,
                       "parent_guid": e.parent_guid, "flags": e.flags,
-                      "reference": refs[rkey], "pointer": e.pointer, "warnings": e.warnings}
-            if proc:
-                proc.created, proc.app, proc.location, proc.context = e.ts, e.app, e.location, ctx
-                proc.metadata_json = sample
-                execution_findings(db, host, proc, cfg, clock)
-            else:
-                proxy = Process(guid="", created=e.ts, app=e.app, location=e.location,
-                                context=ctx, metadata_json=sample, network={})
-                execution_findings(db, host, proxy, cfg, clock)
+                      "reference": ref, "pointer": e.pointer, "warnings": e.warnings}
+            if not historical:
+                if proc:
+                    proc.created, proc.app, proc.location, proc.context = e.ts, e.app, e.location, ctx
+                    proc.metadata_json = sample
+                    execution_findings(db, host, proc, cfg, clock)
+                else:
+                    proxy = Process(guid="", created=e.ts, app=e.app, location=e.location,
+                                    context=ctx, metadata_json=sample, network={})
+                    execution_findings(db, host, proxy, cfg, clock)
             bkey = digest(hid, day, ctx)
             if bkey not in behaviors:
-                behaviors[bkey] = db.get(BehaviorDay, bkey, populate_existing=True)
+                behaviors[bkey] = None if historical else db.get(BehaviorDay, bkey, populate_existing=True)
                 if behaviors[bkey] is None:
                     ck = (hid, day)
                     if ck not in context_counts:
@@ -223,17 +283,23 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                         report["context_limit"] += 1
                         continue
                     context_counts[ck] += 1
-                    # Explicit upsert avoids two ORM identities for a daily summary
-                    # when a previously deleted demo/context identity is reloaded.
-                    if db.bind.dialect.name == "postgresql":
-                        from sqlalchemy.dialects.postgresql import insert
+                    if historical:
+                        behaviors[bkey] = BehaviorDay(id=bkey, host_id=hid, day=day,
+                            context=ctx, app=e.app, parent=e.parent, location=e.location,
+                            count=0, first_seen=e.ts, last_seen=e.ts, sample=sample)
+                        db.add(behaviors[bkey])
                     else:
-                        from sqlalchemy.dialects.sqlite import insert
-                    statement = insert(BehaviorDay).values(id=bkey, host_id=hid, day=day,
-                        context=ctx, app=e.app, parent=e.parent, location=e.location,
-                        count=0, first_seen=e.ts, last_seen=e.ts, sample=sample)
-                    db.execute(statement.on_conflict_do_nothing(index_elements=[BehaviorDay.id]))
-                    behaviors[bkey] = db.get(BehaviorDay, bkey, populate_existing=True)
+                        # Explicit upsert avoids two ORM identities for a daily summary
+                        # when a previously deleted demo/context identity is reloaded.
+                        if db.bind.dialect.name == "postgresql":
+                            from sqlalchemy.dialects.postgresql import insert
+                        else:
+                            from sqlalchemy.dialects.sqlite import insert
+                        statement = insert(BehaviorDay).values(id=bkey, host_id=hid, day=day,
+                            context=ctx, app=e.app, parent=e.parent, location=e.location,
+                            count=0, first_seen=e.ts, last_seen=e.ts, sample=sample)
+                        db.execute(statement.on_conflict_do_nothing(index_elements=[BehaviorDay.id]))
+                        behaviors[bkey] = db.get(BehaviorDay, bkey, populate_existing=True)
             b = behaviors[bkey]
             if b is None:
                 report["context_limit"] += 1
@@ -258,11 +324,14 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
             start = int(e.ts) // WINDOW * WINDOW
             wkey = digest(hid, e.app, e.location, kind, start)
             if wkey not in windows:
-                windows[wkey] = db.get(Window, wkey)
+                windows[wkey] = None if historical else db.get(Window, wkey)
                 if windows[wkey] is None:
                     windows[wkey] = Window(id=wkey, host_id=hid, app=e.app, location=e.location,
-                        kind=kind, start=start, count=0, sketch="", samples=[], reference_ok=True, evaluated=False)
+                        kind=kind, start=start, count=0, sketch="", samples=[], reference_ok=True,
+                        evaluated=historical)
                     db.add(windows[wkey])
+                sketches[wkey] = Diversity(windows[wkey].sketch)
+            elif wkey not in sketches:
                 sketches[wkey] = Diversity(windows[wkey].sketch)
             w = windows[wkey]
             w.count += 1
@@ -270,7 +339,8 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
             exact = e.destination if kind == "ip" else e.query
             if exact not in w.samples and len(w.samples) < 5:
                 w.samples = [*w.samples, exact]
-            w.evaluated = False
+            if not historical:
+                w.evaluated = False
     for key, w in windows.items():
         w.sketch, w.distinct_count = sketches[key].encode(), sketches[key].estimate()
     if batch_id:
