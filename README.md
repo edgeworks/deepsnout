@@ -35,7 +35,7 @@ remaining stable Event 15 payload fields. No binary EVTX reader.
   revalidate the assumption. Result pages use 1,000 rows and scheduled peer-group
   discovery is deferred while a source is catching up. Historical catch-up older
   than the live finding horizon uses bulk baseline prefetching and skips temporary
-  ProcessGuid/reference work that cannot create a current finding.
+  ProcessGuid/reference work that cannot create a current finding. Historical window finalization only touches summaries actually processed in the batch, avoiding failures when a preloaded window belongs to an event later skipped by retention/deduplication.
 - Three local detectors: remote-execution characteristics; new launch contexts
   with exact-GUID-attributed outbound activity; sustained application-level
   destination-diversity changes. Findings have deterministic explanations.
