@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block content %}
+<a class="back" href="/peer-groups">&larr; Peer Groups</a>
+<header class="page-heading"><div>
+  <p class="eyebrow">Automatic comparison cohort &middot; diagnostic only</p>
+  <h1>{{ group.label }}</h1>
+  <p>{{ group.size }} endpoints &middot; {{ group.maturity }} &middot; {{ (group.fraction * 100)|round(1) }}% of profiled hosts</p>
+</div></header>
+<div class="mode-banner">This overlapping group is machine-managed; it requires no approval, does not represent an organizational department, and can never suppress a finding.</div>
+<section class="panel"><h2>Comparison characteristics</h2><p>{{ group.description }}</p>
+  <table><tbody>
+    <tr><th>Routine features per endpoint</th><td>{{ group.min_value }}&ndash;{{ group.max_value }} (median {{ group.median_value }})</td></tr>
+    <tr><th>Median observed days</th><td>{{ group.median_observed_days }}</td></tr>
+    <tr><th>Partial current day</th><td>{{ 'Used; diagnostic only' if group.includes_current_day else 'Not used' }}</td></tr>
+    <tr><th>Detection suppression</th><td>Never</td></tr>
+  </tbody></table>
+</section>
+<section class="panel"><h2>Members</h2>
+  <p class="muted">Search endpoints. At most 500 matching hosts are displayed; the count above covers all members.</p>
+  <form method="get"><label>Search endpoints<input name="q" value="{{ q }}" placeholder="hostname"></label><button>Search</button></form>
+  <table><thead><tr><th>Endpoint</th><th>Approved group</th><th>Last seen</th></tr></thead><tbody>
+  {% for h in members %}<tr><td><a href="/endpoints/{{ h.id }}">{{ h.name }}</a></td><td>{{ h.cohort }}</td><td>{{ h.last_seen|utc }}</td></tr>
+  {% else %}<tr><td colspan="3">No matching endpoints.</td></tr>{% endfor %}
+  </tbody></table>
+</section>
+{% endblock %}

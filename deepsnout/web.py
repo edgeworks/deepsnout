@@ -25,6 +25,7 @@ from .splunk import SplunkSettings, validate_url
 from .worker import enqueue
 from .engine import EXPECTABLE
 from .features import psl_available
+from .analytical_cohorts import analytical_cohort_state, anonymized_cohort_metrics
 from .peer_groups import (suggestion_state, peer_group_catalog, approve_suggestion,
                           reject_suggestion, create_manual_group, assign_host_group,
                           group_options as peer_group_options, group_detail)
@@ -355,13 +356,15 @@ def create_app(config=None):
         with transaction(engine) as db:
             user=login_user(request,db)
             suggestions=suggestion_state(db)
+            analytical=analytical_cohort_state(db)
             catalog=peer_group_catalog(db)
             approved=[]
             for label,item in sorted(catalog.items()):
                 approved.append({"label":label,"kind":item.get("kind","manual"),
                     "maturity":item.get("maturity","manual"),
                     "count":db.scalar(select(func.count()).select_from(Host).where(Host.cohort==label)) or 0})
-            return view(request,"peer_groups.html",user=user,suggestions=suggestions,approved=approved)
+            return view(request,"peer_groups.html",user=user,suggestions=suggestions,
+                        analytical=analytical,approved=approved)
 
     @app.post("/peer-groups/refresh")
     async def peer_groups_refresh(request: Request):
@@ -399,6 +402,30 @@ def create_app(config=None):
             reject_suggestion(db,group_id)
             audit(db,user.username,"peer_group.rejected",group_id)
         return RedirectResponse("/peer-groups",303)
+
+    @app.get("/api/peer-groups/metrics")
+    def analytical_metrics(request: Request):
+        with transaction(engine) as db:
+            login_user(request, db)
+            return JSONResponse(anonymized_cohort_metrics(analytical_cohort_state(db)))
+
+    @app.get("/peer-groups/automatic/{identifier}")
+    def analytical_detail_page(request: Request, identifier: str, q: str = ""):
+        with transaction(engine) as db:
+            user = login_user(request, db)
+            snapshot = analytical_cohort_state(db)
+            group = next((g for g in snapshot.get("groups", [])
+                          if g.get("id") == identifier), None)
+            if not group:
+                raise HTTPException(404, "Automatic cohort not found")
+            ids = group.get("members", [])
+            query = (select(Host).where(Host.id.in_(ids)) if ids
+                     else select(Host).where(Host.id == "__none__"))
+            if q:
+                query = query.where(Host.name.ilike("%" + q[:100] + "%"))
+            members = db.scalars(query.order_by(Host.name).limit(500)).all()
+            return view(request, "analytical_cohort.html", user=user, group=group,
+                        members=members, q=q)
 
     @app.get("/peer-groups/{identifier}")
     def peer_group_page(request: Request,identifier: str,q: str=""):

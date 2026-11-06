@@ -1,5 +1,36 @@
 # Peer groups
 
+## Automatic analytical cohorts (shadow only)
+
+The new comparison cohorts are **overlapping, automatically refreshed and
+non-suppressive**. Each host can belong to multiple independent breadth bands
+based on routine application names, parent-child patterns, application/network
+types and time-of-day activity. For each dimension, fleet tertiles are computed
+from existing bounded 28-day summaries. Equal-valued endpoints stay together;
+bands smaller than 5% (minimum three) or larger than 95% of observed hosts are
+omitted. They are broad comparison strata, not identified business departments,
+trusted-benign groups, learned ML clusters or production-validated peers.
+
+These cohorts do not require analyst approval. They are stored separately under
+the analytical_cohorts state key and cannot alter Host.cohort or suppress findings.
+Existing approved/manual peer groups and DS-EXEC-002 suppression safeguards
+remain unchanged. Cohorts are read-only in the GUI; an authenticated counts-only
+summary without hostnames, executable names or source namespace labels is available
+at /api/peer-groups/metrics. Review even aggregated counts before external sharing.
+
+This is an overwrite-on-refresh diagnostic snapshot, not historical lineage.
+Do not use dynamic cohort membership to justify historical decisions without
+implementing versioned history. Dynamic detector-specific reference selection
+and ML-based scoring are subsequent work, pending real-world validation.
+
+To bound legacy pairwise similarity discovery toward a 5,000-host design target,
+large feature posting lists are matched using deterministic ring neighbors and
+a limited feature budget per host, not their Cartesian product. This is not
+exhaustive and may miss some similar host pairs; broad diagnostic cohorts do
+not depend on those legacy graph edges.
+
+## Approved / manual groups
+
 Peer groups give contextual detectors a reviewed population of comparable endpoints.
 They are similarity groups, not trust labels, asset classifications or proof that
 members are benign.

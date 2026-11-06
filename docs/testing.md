@@ -1,5 +1,18 @@
 # Verification report - 0.1.0a18
 
+## Automatic comparison-cohort milestone
+
+New synthetic tests target 5,000 generated in-memory host profiles, verify
+overlapping/non-suppressive analytical strata, and bound pairwise candidate
+generation. This is NOT verification of real telemetry quality, five-thousand-host
+runtime, PostgreSQL storage throughput, or memory performance. The new code
+requires a fresh CI run and operator validation after Splunk catch-up.
+
+For the operator: refresh Peer Groups, review the automatic cohort coverage,
+inspect the authenticated /api/peer-groups/metrics report, and collect refresh
+runtime and memory/CPU observations. Never run the destructive pytest fixture
+against the production PostgreSQL instance.
+
 ## Automated verification
 
 The 0.1.0a18 feature code is exercised by the Python suite against SQLite and

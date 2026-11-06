@@ -23,6 +23,7 @@ from itertools import combinations
 from sqlalchemy import select, func
 
 from .db import State, Host, BehaviorDay, Window, now, set_state
+from .analytical_cohorts import ALGORITHM as ANALYTICAL_ALGORITHM, discover_analytical_cohorts
 
 DAY = 86400
 MAX_REFERENCE_DAYS = 28
@@ -354,33 +355,52 @@ def _components(nodes, edges):
 
 
 def _candidate_pairs(profiles, technical=False, progress=None, stage="candidate-pairs"):
+    """Bound large feature postings instead of creating quadratic all-pairs work."""
     n = len(profiles)
     buckets = defaultdict(list)
-    if technical:
-        for host_id, profile in profiles.items():
-            for feature in profile["technical"]:
+    for host_id, profile in profiles.items():
+        if technical:
+            features = list(profile["technical"])
+            if n >= 64:
+                features = features[:32]
+            for feature in features:
                 buckets[feature].append(host_id)
-    else:
-        for host_id, profile in profiles.items():
+        else:
             for channel in ("applications", "bundles", "process", "network"):
-                for feature in profile["channels"].get(channel, {}):
+                features = list(profile["channels"].get(channel, {}))
+                if n >= 64:
+                    features = features[:8]
+                for feature in features:
                     buckets[f"{channel}:{feature}"].append(host_id)
 
     candidate_hits = defaultdict(int)
     maximum_bucket = n if n < 20 else max(16, min(300, int(n * 0.45)))
     pair_iterations = 0
-    for members in buckets.values():
-        if not 2 <= len(members) <= maximum_bucket:
+    bounded_postings = 0
+    for posting in buckets.values():
+        if not 2 <= len(posting) <= maximum_bucket:
             continue
-        for left, right in combinations(sorted(members), 2):
+        members = sorted(set(posting))
+        size = len(members)
+        if size <= 24:
+            pairs = combinations(members, 2)
+        else:
+            bounded_postings += 1
+            # Every host is covered; deterministic ring neighbors bound large
+            # postings to O(8 * members) instead of O(members squared).
+            pairs = ((members[i], members[(i + offset) % size])
+                     for i in range(size) for offset in range(1, 9))
+        for left, right in pairs:
+            if left > right:
+                left, right = right, left
             candidate_hits[(left, right)] += 1
             pair_iterations += 1
             if pair_iterations % PROGRESS_EVERY == 0:
                 _progress(progress, stage, pair_iterations=pair_iterations,
-                          candidate_pairs=len(candidate_hits))
+                          candidate_pairs=len(candidate_hits), bounded_postings=bounded_postings)
     minimum_shared = 1 if n < 20 else 2
     _progress(progress, stage, pair_iterations=pair_iterations,
-              candidate_pairs=len(candidate_hits))
+              candidate_pairs=len(candidate_hits), bounded_postings=bounded_postings)
     return [pair for pair, hits in candidate_hits.items() if hits >= minimum_shared]
 
 
@@ -573,7 +593,7 @@ def _discover_namespace(db, namespace, clock, progress=None):
     n = len(profiles)
     if n < 3:
         return [], {"namespace": namespace, "hosts_profiled": n, "observed_days": namespace_days,
-                    "includes_current_day": includes_current_day, "recommended": 0, "technical": 0}
+                    "includes_current_day": includes_current_day, "recommended": 0, "technical": 0}, []
 
     peer_edges = []
     _progress(progress, "peer-candidates", namespace=namespace, hosts=n)
@@ -624,6 +644,7 @@ def _discover_namespace(db, namespace, clock, progress=None):
 
     groups.sort(key=lambda group: (0 if group["peer_suitability"] == "recommended" else 1,
                                    -group["size"], group["id"]))
+    automatic, _ = discover_analytical_cohorts(namespace, profiles, includes_current_day, clock)
     return groups, {
         "namespace": namespace,
         "hosts_profiled": n,
@@ -631,7 +652,7 @@ def _discover_namespace(db, namespace, clock, progress=None):
         "includes_current_day": includes_current_day,
         "recommended": sum(group["peer_suitability"] == "recommended" for group in groups),
         "technical": sum(group["peer_suitability"] == "technical" for group in groups),
-    }
+    }, automatic
 
 
 def refresh_peer_groups(db, clock=None, progress=None):
@@ -642,6 +663,7 @@ def refresh_peer_groups(db, clock=None, progress=None):
     rejected = set(_state_value(db, "peer_group_rejections", {"fingerprints": []}).get("fingerprints", []))
     namespaces = db.scalars(select(Host.namespace).distinct()).all()
     suggestions, summaries = [], []
+    analytical_groups, analytical_summaries = [], []
     matched_auto = set()
 
     by_fingerprint = {value.get("fingerprint"): (key, value) for key, value in registry.items()
@@ -649,8 +671,18 @@ def refresh_peer_groups(db, clock=None, progress=None):
 
     for namespace in namespaces:
         _progress(progress, "namespace-start", namespace=namespace)
-        groups, summary = _discover_namespace(db, namespace, clock, progress=progress)
+        groups, summary, automatic = _discover_namespace(db, namespace, clock, progress=progress)
         summaries.append(summary)
+        analytical_groups.extend(automatic)
+        covered = set().union(*(set(g["members"]) for g in automatic)) if automatic else set()
+        analytical_summaries.append({
+            "namespace": namespace, "hosts_profiled": summary["hosts_profiled"],
+            "hosts_covered": len(covered),
+            "coverage_percent": round(100 * len(covered) / summary["hosts_profiled"], 1)
+                                if summary["hosts_profiled"] else 0,
+            "member_assignments": sum(g["size"] for g in automatic),
+            "includes_current_day": summary["includes_current_day"],
+        })
         _progress(progress, "namespace-groups", namespace=namespace, groups=len(groups))
         for group in groups:
             approved = by_fingerprint.get(group["fingerprint"])
@@ -676,6 +708,10 @@ def refresh_peer_groups(db, clock=None, progress=None):
     # Approved automatic groups whose defining fingerprint disappeared are kept as
     # they were. Drift/prototype lineage remains an explicit follow-up rather than
     # silently redefining an analyst-approved identity.
+    set_state(db, "analytical_cohorts", {
+        "algorithm": ANALYTICAL_ALGORITHM, "updated_at": clock,
+        "groups": analytical_groups, "summaries": analytical_summaries,
+    })
     set_state(db, "peer_group_registry", {"groups": registry, "updated_at": clock})
     learning = any(item.get("includes_current_day") or item.get("observed_days", 0) < 7 for item in summaries)
     value = {"updated_at": clock, "learning": learning, "summaries": summaries,
@@ -683,6 +719,8 @@ def refresh_peer_groups(db, clock=None, progress=None):
     set_state(db, "peer_group_suggestions", value)
     _progress(progress, "finalizing", namespaces=len(summaries), suggestions=len(suggestions))
     return {"suggestions": len(suggestions), "approved_auto_matched": len(matched_auto),
+            "analytical_cohorts": len(analytical_groups),
+            "analytical_covered_hosts": sum(s["hosts_covered"] for s in analytical_summaries),
             "namespaces": len(summaries), "learning": learning,
             "recommended": sum(group.get("peer_suitability") == "recommended" for group in suggestions),
             "technical": sum(group.get("peer_suitability") == "technical" for group in suggestions)}
