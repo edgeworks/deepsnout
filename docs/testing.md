@@ -8,6 +8,12 @@ generation. This is NOT verification of real telemetry quality, five-thousand-ho
 runtime, PostgreSQL storage throughput, or memory performance. The new code
 requires a fresh CI run and operator validation after Splunk catch-up.
 
+The quality-diagnostic follow-up measures capped within-cohort versus fleet
+feature-set overlap in four independent views. Synthetic tests verify that
+identical feature counts cannot masquerade as identical features, empty
+channels remain unscorable, and reports expose neither names nor IDs.
+A successful test is not evidence of population similarity in production.
+
 For the operator: refresh Peer Groups, review the automatic cohort coverage,
 inspect the authenticated /api/peer-groups/metrics report, and collect refresh
 runtime and memory/CPU observations. Never run the destructive pytest fixture

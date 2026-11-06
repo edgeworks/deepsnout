@@ -23,7 +23,8 @@ from itertools import combinations
 from sqlalchemy import select, func
 
 from .db import State, Host, BehaviorDay, Window, now, set_state
-from .analytical_cohorts import ALGORITHM as ANALYTICAL_ALGORITHM, discover_analytical_cohorts
+from .analytical_cohorts import (ALGORITHM as ANALYTICAL_ALGORITHM,
+                                discover_analytical_cohorts, assess_cohort_quality)
 
 DAY = 86400
 MAX_REFERENCE_DAYS = 28
@@ -592,7 +593,8 @@ def _discover_namespace(db, namespace, clock, progress=None):
         db, namespace, clock, progress=progress)
     n = len(profiles)
     if n < 3:
-        return [], {"namespace": namespace, "hosts_profiled": n, "observed_days": namespace_days,
+        return [], {"namespace": namespace, "hosts_profiled": n, "hosts_known": len(hosts),
+                    "observed_days": namespace_days, "observed_day_bands": {},
                     "includes_current_day": includes_current_day, "recommended": 0, "technical": 0}, []
 
     peer_edges = []
@@ -645,9 +647,19 @@ def _discover_namespace(db, namespace, clock, progress=None):
     groups.sort(key=lambda group: (0 if group["peer_suitability"] == "recommended" else 1,
                                    -group["size"], group["id"]))
     automatic, _ = discover_analytical_cohorts(namespace, profiles, includes_current_day, clock)
+    _progress(progress, "analytical-quality", namespace=namespace, groups=len(automatic))
+    assess_cohort_quality(profiles, automatic)
+    observed_day_bands = {"1-2": 0, "3-6": 0, "7-13": 0, "14+": 0}
+    for profile in profiles.values():
+        observed = profile["observed_days"]
+        bucket = ("1-2" if observed < 3 else "3-6" if observed < 7
+                  else "7-13" if observed < 14 else "14+")
+        observed_day_bands[bucket] += 1
     return groups, {
         "namespace": namespace,
         "hosts_profiled": n,
+        "hosts_known": len(hosts),
+        "observed_day_bands": observed_day_bands,
         "observed_days": namespace_days,
         "includes_current_day": includes_current_day,
         "recommended": sum(group["peer_suitability"] == "recommended" for group in groups),
@@ -677,6 +689,8 @@ def refresh_peer_groups(db, clock=None, progress=None):
         covered = set().union(*(set(g["members"]) for g in automatic)) if automatic else set()
         analytical_summaries.append({
             "namespace": namespace, "hosts_profiled": summary["hosts_profiled"],
+            "hosts_known": summary.get("hosts_known", summary["hosts_profiled"]),
+            "observed_day_bands": summary.get("observed_day_bands", {}),
             "hosts_covered": len(covered),
             "coverage_percent": round(100 * len(covered) / summary["hosts_profiled"], 1)
                                 if summary["hosts_profiled"] else 0,

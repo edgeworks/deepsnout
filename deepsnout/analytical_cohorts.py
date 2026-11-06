@@ -5,7 +5,9 @@ They are neither approved organizational identities nor trusted benign baselines
 """
 import hashlib
 import math
+import random
 import statistics
+from itertools import combinations
 
 ALGORITHM = "analytical-strata-v1"
 DIMENSIONS = (
@@ -80,6 +82,91 @@ def discover_analytical_cohorts(namespace, profiles, includes_current_day, clock
     }
 
 
+# Bound all quality comparisons regardless of population size. This function is
+# invoked once per completed discovery job, never per ingested event.
+MAX_QUALITY_PAIRS = 160
+QUALITY_CHANNELS = ("applications", "process", "network", "activity")
+
+
+def _sample_pairs(host_ids, seed):
+    """Stable, uniformly sampled unordered host pairs without replacement."""
+    host_ids = sorted(host_ids)
+    population = len(host_ids)
+    if population < 2:
+        return []
+    goal = min(MAX_QUALITY_PAIRS, population * (population - 1) // 2)
+    if population <= 18:
+        return list(combinations(host_ids, 2))
+    rng = random.Random(int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16], 16))
+    pairs = set()
+    while len(pairs) < goal:
+        left, right = sorted(rng.sample(host_ids, 2))
+        pairs.add((left, right))
+    return sorted(pairs)
+
+
+def _overlap(first, second):
+    """Weighted Jaccard. Two empty profiles are not comparable, not identical."""
+    if not first and not second:
+        return None
+    if not first or not second:
+        return 0.0
+    both = set(first) & set(second)
+    numerator = sum(min(first[item], second[item]) for item in both)
+    denominator = sum(max(first.get(item, 0), second.get(item, 0))
+                      for item in set(first) | set(second))
+    return numerator / denominator if denominator else None
+
+
+def assess_cohort_quality(profiles, groups):
+    """Annotate shadow cohorts with sampled feature overlap versus fleet pairs.
+
+    The defining dimension is NOT independent evidence of quality. We report all
+    four channels separately so an analyst can evaluate cross-view agreement.
+    These are descriptive, potentially biased overlap estimates, not p-values,
+    security confidence, or approval for peer-based suppression.
+    """
+    if not groups:
+        return
+    fleet_pairs = _sample_pairs(profiles, "fleet-quality-v1")
+    # The same fleet reference is reused across cohorts, ensuring that their
+    # comparisons share a baseline rather than different random control groups.
+    def average(pairs, channel):
+        values = []
+        for left, right in pairs:
+            lp = profiles[left].get("channels") or profiles[left].get("raw", {})
+            rp = profiles[right].get("channels") or profiles[right].get("raw", {})
+            score = _overlap(lp.get(channel, {}), rp.get(channel, {}))
+            if score is not None:
+                values.append(score)
+        return (sum(values) / len(values) if values else None, len(values))
+
+    fleet = {channel: average(fleet_pairs, channel) for channel in QUALITY_CHANNELS}
+    for group in groups:
+        within_pairs = _sample_pairs(group["members"], group["id"] + ":quality-v1")
+        comparisons = {}
+        independent = 0
+        for channel in QUALITY_CHANNELS:
+            inside, inside_count = average(within_pairs, channel)
+            outside, outside_count = fleet[channel]
+            delta = (inside - outside if inside is not None and outside is not None
+                     else None)
+            comparisons[channel] = {
+                "within": round(inside, 3) if inside is not None else None,
+                "fleet": round(outside, 3) if outside is not None else None,
+                "delta": round(delta, 3) if delta is not None else None,
+                "within_pairs": inside_count,
+                "fleet_pairs": outside_count,
+            }
+            if (channel != group["dimension"] and inside_count >= 12
+                    and outside_count >= 12 and delta is not None
+                    and inside is not None and inside >= 0.10 and delta >= 0.08):
+                independent += 1
+        group["quality"] = comparisons
+        group["independent_support_channels"] = independent
+        group["quality_pair_budget"] = MAX_QUALITY_PAIRS
+
+
 def analytical_cohort_state(db):
     """Snapshot kept separately from legacy analyst-approved peer groups."""
     from .db import State
@@ -89,7 +176,7 @@ def analytical_cohort_state(db):
                   "groups": [], "summaries": []})
 
 
-def anonymized_cohort_metrics(state):
+def anonymized_cohort_metrics(state, suggestions=None):
     """Counts only; no source namespaces, host IDs, or executable labels."""
     summary_rows = []
     for summary in state.get("summaries", []):
@@ -107,6 +194,28 @@ def anonymized_cohort_metrics(state):
             "size_distribution": sorted(g["size"] for g in groups),
             "dimensions": {key: sorted(vals) for key, vals in sorted(by_dimension.items())},
             "uses_partial_day": summary.get("includes_current_day", False),
+            "hosts_known": summary.get("hosts_known"),
+            "observed_day_bands": summary.get("observed_day_bands", {}),
+            "cohort_quality": [
+                {"dimension": group["dimension"],
+                 "band": group["band"],
+                 "size": group["size"],
+                 "independent_support_channels": group.get("independent_support_channels", 0),
+                 "similarity": group.get("quality", {})}
+                for group in sorted(groups, key=lambda g: (g["dimension"], g["band"]))
+            ],
         })
-    return {"algorithm": state.get("algorithm", ALGORITHM),
-            "namespace_statistics": summary_rows}
+    result = {"algorithm": state.get("algorithm", ALGORITHM),
+              "quality_method": "sampled-weighted-jaccard-v1",
+              "quality_pair_budget_per_cohort": MAX_QUALITY_PAIRS,
+              "namespace_statistics": summary_rows}
+    if suggestions is not None:
+        legacy_sizes = {"recommended": [], "technical": []}
+        for group in suggestions.get("groups", []):
+            kind = group.get("peer_suitability")
+            if kind in legacy_sizes:
+                legacy_sizes[kind].append(group.get("size", 0))
+        result["legacy_unreviewed_group_sizes"] = {
+            kind: sorted(sizes) for kind, sizes in legacy_sizes.items()
+        }
+    return result

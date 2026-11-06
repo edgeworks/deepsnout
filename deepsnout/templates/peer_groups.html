@@ -1,14 +1,15 @@
 {% extends 'base.html' %}{% block content %}<header class="page-heading"><div><p class="eyebrow">Peer comparison</p><h1>Peer Groups</h1><p>DeepSnout now separates broad behavioral peer candidates from narrower technical clusters. Suggestions never affect detection until an analyst approves them.</p></div>{% if user.role in ['admin','analyst'] %}<form method="post" action="/peer-groups/refresh"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh suggestions</button></form>{% endif %}</header>{% if suggestions.learning %}<div class="mode-banner">EARLY GROUPING &mdash; suggestions are based on limited observation data and may change as DeepSnout learns more. Provisional automatic groups can expose peer evidence, but cannot suppress DS-EXEC-002 findings.</div>{% endif %}<section class="panel">
   <h2>Automatic comparison cohorts</h2>
-  <p class="muted">Read-only, overlapping, machine-maintained behavior strata. They require no approval and cannot suppress detections. They are not organizational departments or general trust labels.</p>
+  <p class="muted">Read-only, overlapping, machine-maintained behavior strata. They require no approval and cannot suppress detections. They are not organizational departments or general trust labels. Breadth bands are not evidence of behavioral cohesion; the sampled within-cohort versus fleet similarity below helps assess that distinction.</p>
   {% for s in analytical.summaries %}
   <p><strong>Population {{ loop.index }}:</strong> {{ s.hosts_covered }} / {{ s.hosts_profiled }} hosts covered ({{ s.coverage_percent }}%), {{ s.member_assignments }} overlapping memberships.</p>
   {% else %}<p class="muted">Discovery has not completed yet.</p>{% endfor %}
   {% if analytical.groups %}
-  <table><thead><tr><th>Cohort</th><th>Hosts</th><th>Routine features</th><th>Maturity</th></tr></thead><tbody>
+  <table><thead><tr><th>Cohort</th><th>Hosts</th><th>Routine features</th><th>Independent views</th><th>Maturity</th></tr></thead><tbody>
   {% for g in analytical.groups %}
   <tr><td><a href="/peer-groups/automatic/{{ g.id }}">{{ g.label }}</a></td><td>{{ g.size }}</td>
-  <td>{{ g.min_value }}&ndash;{{ g.max_value }} (median {{ g.median_value }})</td><td>{{ g.maturity }}</td></tr>
+  <td>{{ g.min_value }}&ndash;{{ g.max_value }} (median {{ g.median_value }})</td>
+  <td>{{ g.independent_support_channels|default('not measured') }}/3</td><td>{{ g.maturity }}</td></tr>
   {% endfor %}</tbody></table>{% endif %}
   <p class="muted"><a href="/api/peer-groups/metrics">Counts-only diagnostic JSON</a> (review organizational policy before sharing even aggregated counts).</p>
 </section>

@@ -1,6 +1,7 @@
 """Synthetic cohort checks; no live fleet or organization telemetry."""
 from deepsnout.analytical_cohorts import (
     discover_analytical_cohorts, anonymized_cohort_metrics, analytical_cohort_state,
+    assess_cohort_quality,
 )
 from deepsnout.peer_groups import _candidate_pairs, refresh_peer_groups
 from deepsnout.db import Host
@@ -72,3 +73,58 @@ def test_refresh_preserves_detector_group_assignments(db):
     state = analytical_cohort_state(db)
     assert state["algorithm"] == "analytical-strata-v1"
     assert state["summaries"][0]["hosts_profiled"] == 6
+
+
+
+def test_sampled_similarity_distinguishes_real_features_from_breadth():
+    # Identical feature count across every host; actual application identities
+    # distinguish the two populations. A feature *count* alone cannot do this.
+    profiles = {}
+    for i in range(120):
+        label = "alpha" if i < 60 else "beta"
+        profiles[f"host{i:03d}"] = {
+            "channels": {
+                "applications": {f"app:{label}-{j}.exe": 1.0 for j in range(3)},
+                "network": {f"net:{label}-agent:ip": 1.0},
+                "process": {},
+                "activity": {"activity:utc1": 1.0},
+            },
+            "observed_days": 20,
+        }
+    sample = [{"id": "ac-test", "dimension": "activity",
+               "members": [f"host{i:03d}" for i in range(60)]}]
+    assess_cohort_quality(profiles, sample)
+    quality = sample[0]["quality"]
+    assert quality["applications"]["within"] == 1.0
+    assert quality["applications"]["delta"] > 0.2
+    assert quality["network"]["delta"] > 0.2
+    assert sample[0]["independent_support_channels"] == 2
+    assert quality["process"]["within"] is None
+    assert quality["process"]["fleet"] is None
+
+
+def test_quality_has_no_false_support_when_all_profiles_identical():
+    profiles = {
+        f"host{i:03d}": {"channels": {"applications": {"app:same.exe": 1.0}},
+                          "observed_days": 8}
+        for i in range(60)
+    }
+    groups = [{"id": "ac-same", "dimension": "applications",
+               "members": [f"host{i:03d}" for i in range(30)]}]
+    assess_cohort_quality(profiles, groups)
+    assert groups[0]["independent_support_channels"] == 0
+    assert groups[0]["quality"]["applications"]["delta"] == 0
+    assert groups[0]["quality"]["network"]["within"] is None
+
+
+def test_counts_only_report_contains_no_identifiers_or_features(db):
+    seed_two_groups(db, [1, 2, 3, 4, 5, 6, 7, 8])
+    refresh_peer_groups(db, clock=DAY_START + 3600)
+    from deepsnout.peer_groups import suggestion_state
+    report = anonymized_cohort_metrics(analytical_cohort_state(db), suggestion_state(db))
+    assert "default" not in str(report)
+    assert "cad0" not in str(report)
+    assert "acad.exe" not in str(report)
+    assert "legacy_unreviewed_group_sizes" in report
+    assert report["namespace_statistics"][0]["hosts_known"] == 6
+    assert sum(report["namespace_statistics"][0]["observed_day_bands"].values()) == 6

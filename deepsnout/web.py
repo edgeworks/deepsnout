@@ -407,7 +407,8 @@ def create_app(config=None):
     def analytical_metrics(request: Request):
         with transaction(engine) as db:
             login_user(request, db)
-            return JSONResponse(anonymized_cohort_metrics(analytical_cohort_state(db)))
+            return JSONResponse(anonymized_cohort_metrics(analytical_cohort_state(db),
+                                                        suggestion_state(db)))
 
     @app.get("/peer-groups/automatic/{identifier}")
     def analytical_detail_page(request: Request, identifier: str, q: str = ""):

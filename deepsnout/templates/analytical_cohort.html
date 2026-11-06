@@ -15,6 +15,18 @@
     <tr><th>Detection suppression</th><td>Never</td></tr>
   </tbody></table>
 </section>
+<section class="panel"><h2>Sampled behavioral similarity</h2>
+  <p class="muted">Weighted feature-set overlap (0–1) for sampled host pairs inside this cohort, compared with sampled pairs across the fleet. A positive difference in a <em>different</em> dimension provides independent support, not validation or permission to suppress detections. Missing values mean insufficient comparable evidence.</p>
+  <table><thead><tr><th>View</th><th>Within cohort</th><th>Fleet baseline</th><th>Difference</th><th>Pairs</th></tr></thead>
+  <tbody>{% for channel, comparison in group.quality|default({})|dictsort %}
+  <tr><td>{{ channel }}{% if channel == group.dimension %} (defining view){% endif %}</td>
+  <td>{{ comparison.within if comparison.within is not none else 'n/a' }}</td>
+  <td>{{ comparison.fleet if comparison.fleet is not none else 'n/a' }}</td>
+  <td>{{ comparison.delta if comparison.delta is not none else 'n/a' }}</td>
+  <td>{{ comparison.within_pairs }} / {{ comparison.fleet_pairs }}</td></tr>
+  {% endfor %}</tbody></table>
+  <p><strong>Independent supporting dimensions:</strong> {{ group.independent_support_channels|default('not measured') }} of 3 possible. Exploratory diagnostic only.</p>
+</section>
 <section class="panel"><h2>Members</h2>
   <p class="muted">Search endpoints. At most 500 matching hosts are displayed; the count above covers all members.</p>
   <form method="get"><label>Search endpoints<input name="q" value="{{ q }}" placeholder="hostname"></label><button>Search</button></form>

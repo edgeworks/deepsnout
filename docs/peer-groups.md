@@ -18,6 +18,30 @@ remain unchanged. Cohorts are read-only in the GUI; an authenticated counts-only
 summary without hostnames, executable names or source namespace labels is available
 at /api/peer-groups/metrics. Review even aggregated counts before external sharing.
 
+### Quality diagnostics (added after first live cohort census)
+
+Each automatic cohort is now assessed using at most 160 sampled host pairs
+and a shared fleet-wide control sample. Within each pair, weighted-Jaccard
+overlap is measured independently for applications, process relationships,
+network-active applications and activity windows. Two hosts with no features
+in a channel are *not* treated as identical: the comparison is unavailable.
+The counts-only metrics endpoint reports within/fleet similarity, the difference,
+and actual comparable-pair counts for each channel. An independent supporting
+view requires at least 12 comparable pairs in both samples, at least 0.10 within
+similarity, and a >=0.08 advantage over the fleet. Those thresholds are
+heuristic diagnostics, not statistical significance tests.
+
+A cohort is defined by the breadth of one channel: that channel's overlap
+cannot validate its grouping. Cross-channel comparisons can reveal whether
+breadth bands correspond to actual shared behavior. A low difference, even
+at 100% fleet coverage, means no demonstrated analytical peer benefit.
+The output also includes counts-only distributions of unreviewed legacy
+recommended vs technical groups and observed host history bands. "Known hosts"
+means the total namespace Host records; "profiled hosts" requires observations
+within the current reference window. All measurements remain shadow-only,
+and may be biased by telemetry coverage or host activity. Group membership
+and detector suppression remain unchanged.
+
 This is an overwrite-on-refresh diagnostic snapshot, not historical lineage.
 Do not use dynamic cohort membership to justify historical decisions without
 implementing versioned history. Dynamic detector-specific reference selection
