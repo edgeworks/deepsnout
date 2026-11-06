@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block content %}
+<a class="back" href="/peer-groups">&larr; Peer Groups</a>
+<header class="page-heading"><div>
+  <p class="eyebrow">Experimental similarity cohort &middot; shadow only</p>
+  <h1>{{ group.label }}</h1>
+  <p>{{ group.size }} hosts &middot; {{ group.status }} &middot; {{ group.maturity }}</p>
+</div></header>
+<div class="mode-banner">Machine-generated exploratory population, not a department or a benign/trusted group. No approval or detector suppression is possible.</div>
+<section class="panel"><h2>Why these hosts were selected</h2>
+  <p>{{ group.description }}</p>
+  <p><strong>Recurring applications:</strong> {{ group.anchors|join(' + ') }}</p>
+  <p><strong>Additional supporting views:</strong> {{ group.supporting_views|join(', ') if group.supporting_views else 'None observed' }}</p>
+  <p><strong>Median observed days:</strong> {{ group.median_observed_days }}</p>
+</section>
+<section class="panel"><h2>Sampled behavioral similarity versus fleet</h2>
+  <p class="muted">Weighted feature overlap (0–1). Application overlap is a result of the selection method, not independent validation. Process/network views may also correlate with the same applications. These are exploratory diagnostics, not statistical confidence.</p>
+  <table><thead><tr><th>View</th><th>Within</th><th>Fleet</th><th>Difference</th><th>Compared pairs</th></tr></thead>
+  <tbody>{% for channel, score in group.quality|dictsort %}
+  <tr><td>{{ channel }}{% if channel == 'applications' %} (defining){% endif %}</td>
+  <td>{{ score.within if score.within is not none else 'n/a' }}</td>
+  <td>{{ score.fleet if score.fleet is not none else 'n/a' }}</td>
+  <td>{{ score.delta if score.delta is not none else 'n/a' }}</td>
+  <td>{{ score.within_pairs }} / {{ score.fleet_pairs }}</td></tr>
+  {% endfor %}</tbody></table>
+</section>
+<section class="panel"><h2>Members</h2>
+  <form method="get"><label>Search hosts<input name="q" value="{{ q }}" placeholder="hostname"></label><button>Search</button></form>
+  <p class="muted">Up to 500 matching endpoints are shown; total is above.</p>
+  <table><thead><tr><th>Host</th><th>Approved group</th></tr></thead><tbody>
+  {% for h in members %}<tr><td><a href="/endpoints/{{ h.id }}">{{ h.name }}</a></td>
+  <td>{{ h.cohort }}</td></tr>{% else %}<tr><td colspan="2">No matching hosts.</td></tr>{% endfor %}
+  </tbody></table>
+</section>
+{% endblock %}
