@@ -1,11 +1,12 @@
 {% extends 'base.html' %}{% block content %}<header class="page-heading"><div><p class="eyebrow">Peer comparison</p><h1>Peer Groups</h1><p>DeepSnout now separates broad behavioral peer candidates from narrower technical clusters. Suggestions never affect detection until an analyst approves them.</p></div>{% if user.role in ['admin','analyst'] %}<form method="post" action="/peer-groups/refresh"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh suggestions</button></form>{% endif %}</header>{% if suggestions.learning %}<div class="mode-banner">EARLY GROUPING &mdash; suggestions are based on limited observation data and may change as DeepSnout learns more. Provisional automatic groups can expose peer evidence, but cannot suppress DS-EXEC-002 findings.</div>{% endif %}<section class="panel">
   <h2>Behavioral similarity candidates (experimental)</h2>
-  <p class="muted">Overlapping machine-managed shadow groups seeded by actually shared recurring applications, with process/network similarity sampled against the fleet. No approval required; they never suppress detections.</p>
+  <p class="muted">Overlapping shadow groups seeded by shared recurring applications. Support is now assessed after excluding process/network features directly attributable to seed executables, using outside hosts matched on application breadth and observed days. This remains diagnostic, not independent validation. No approval or suppression.</p>
   {% for summary in analytical.similarity_summaries|default([]) %}
   <p><strong>Population {{ loop.index }}:</strong> {{ summary.hosts_eligible }} sufficiently observed hosts;
   {{ summary.candidate_pairs }} application pairs, {{ summary.quality_evaluated }} candidate groups evaluated;
-  {{ summary.groups }} displayed ({{ summary.supported_groups }} with process/network support);
-  {{ summary.hosts_covered }} eligible hosts covered.</p>
+  {{ summary.groups }} displayed ({{ summary.supported_groups }} with residual process/network support);
+  {{ summary.hosts_covered }} eligible hosts covered;
+  {{ summary.max_memberships_per_host|default(0) }} maximum memberships per host.</p>
   {% endfor %}
   {% if analytical.similarity_groups|default([]) %}
   <table><thead><tr><th>Similarity group</th><th>Hosts</th><th>Supporting views</th><th>Application delta</th><th>Assessment</th></tr></thead>

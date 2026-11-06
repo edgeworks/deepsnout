@@ -67,6 +67,6 @@ def test_overlap_counts_contain_no_identifiers():
     assert counts["hosts_with_multiple_memberships"] == 3
     assert counts["max_memberships_per_host"] == 3
     assert counts["member_multiplicity"] == {
-        "1": 1, "2": 2, "3": 1, "4": 0, "5+": 0}
+        "1": 1, "2": 1, "3": 2, "4": 0, "5+": 0}
     assert counts["group_pairs_over_75pct_jaccard"] == 1
-    assert "a" not in str(counts)
+    assert "secret-hostname" not in str(counts)

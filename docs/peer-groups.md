@@ -11,13 +11,24 @@ deduplicated. At most 80 groups are scored and 32 displayed per namespace.
 
 A group's application overlap is high by construction, not validation. Each
 candidate is compared with a fleet reference using up to 160 sampled host pairs
-for application, process, network and activity similarity. "Supported" requires
-app delta >=0.10 plus process or network delta >=0.08 with adequate pair counts.
-These process/network features may also derive from the same applications; the
-term means preliminary cross-view support, not proof of meaningful peers,
-statistical significance, a benign verdict or an ability to suppress alerts.
-"Exploratory" candidates are also shown. Groups may overlap and full coverage
-is not forced. Unqualified hosts remain ungrouped.
+for application, process, network and activity similarity. Since this can
+partly be driven by the seed applications themselves, the v2 diagnostic also
+**removes process/network features directly attributable to the seed executables**.
+It compares sampled within-group host pairs against the *same inside host*
+paired with an outside-group control chosen from a similar application-breadth
+and observed-days band. At least 24 valid residual pair comparisons, residual
+within similarity >=0.12, residual matched-control delta >=0.08, and an
+application-to-fleet delta >=0.10 are required for a "supported" screening
+result. Missing suitable controls fails closed to exploratory.
+
+The output separately reports the original (unmasked) and residual support
+counts across all evaluated candidates, not just the displayed top 32.
+It also reports counts-only overlap among displayed groups, including
+memberships-per-host distribution and pairwise member-set Jaccard.
+**Support remains observational:** other software from the same suite may
+still contribute correlated signals. This is not temporal holdout validation,
+a statistical significance claim, a benign trust label, or permission to
+suppress detections. Groups may overlap and coverage is not forced.
 
 These groups are read-only, automatically refreshed and stored alongside the
 previous breadth strata in application state. They never change Host.cohort,

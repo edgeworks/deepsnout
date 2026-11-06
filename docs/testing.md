@@ -8,6 +8,12 @@ generation. This is NOT verification of real telemetry quality, five-thousand-ho
 runtime, PostgreSQL storage throughput, or memory performance. The new code
 requires a fresh CI run and operator validation after Splunk catch-up.
 
+The residual matched-control diagnostic adds synthetic negative controls
+where process/network features are solely consequences of seed executables,
+plus tests for comparable outside hosts, unavailable controls and overlap
+cardinality. The supported label is provisional; the experiment has not been
+validated with temporally held-out organizational telemetry.
+
 The new application-pair shadow discovery has synthetic tests for actual shared
 features, absent corroborating behavior, sparse history and deterministic
 5,000-host input. No production dataset or endpoint telemetry was uploaded

@@ -11,8 +11,9 @@ import math
 import statistics
 
 from .analytical_cohorts import assess_cohort_quality
+from .similarity_validation import assess_residual_quality, overlap_stats
 
-ALGORITHM = "app-bundle-multiview-shadow-v1"
+ALGORITHM = "app-bundle-multiview-shadow-v2"
 MIN_DAYS = 7
 MAX_APPS = 16
 MAX_EVALUATED = 80
@@ -29,7 +30,10 @@ def discover_similarity_cohorts(namespace, profiles, partial_day, clock):
               "hosts_eligible": n, "min_group_size": minimum,
               "candidate_pairs": 0, "quality_evaluated": 0,
               "groups": 0, "supported_groups": 0,
-              "hosts_covered": 0, "member_assignments": 0}
+              "hosts_covered": 0, "member_assignments": 0,
+              "unmasked_evaluated_supported": 0,
+              "residual_evaluated_supported": 0,
+              **overlap_stats([])}
     if n < 40:
         return [], report
 
@@ -114,6 +118,7 @@ def discover_similarity_cohorts(namespace, profiles, partial_day, clock):
     report["quality_evaluated"] = len(candidates)
 
     assess_cohort_quality(eligible, candidates)
+    assess_residual_quality(eligible, candidates)
     for group in candidates:
         quality = group["quality"]
         app_delta = quality["applications"]["delta"]
@@ -126,11 +131,21 @@ def discover_similarity_cohorts(namespace, profiles, partial_day, clock):
                 quality[channel]["delta"] is not None and
                 quality[channel]["delta"] >= 0.08)
         ]
-        group["supporting_views"] = support
-        group["independent_support_channels"] = len(support)
+        # Keep the original unmasked view for comparison. It often inherits
+        # the application pair used to construct the cohort, so it cannot
+        # alone justify marking that cohort as supported.
+        group["unmasked_supporting_views"] = support
+        group["supporting_views"] = group["residual_supporting_views"]
+        group["independent_support_channels"] = len(group["supporting_views"])
         group["application_delta"] = app_delta
-        group["status"] = ("supported" if support and app_delta is not None
-                           and app_delta >= 0.10 else "exploratory")
+        group["status"] = (
+            "supported" if group["supporting_views"] and app_delta is not None
+            and app_delta >= 0.10 else "exploratory"
+        )
+    unmasked_total = sum(bool(g["unmasked_supporting_views"]) and
+                         g["application_delta"] is not None and
+                         g["application_delta"] >= 0.10 for g in candidates)
+    residual_total = sum(g["status"] == "supported" for g in candidates)
     candidates.sort(key=lambda g: (
         g["status"] != "supported",
         -(g["application_delta"] if g["application_delta"] is not None else -1),
@@ -140,6 +155,9 @@ def discover_similarity_cohorts(namespace, profiles, partial_day, clock):
     covered = set().union(*(set(g["members"]) for g in groups)) if groups else set()
     report.update(groups=len(groups),
                   supported_groups=sum(g["status"] == "supported" for g in groups),
+                  unmasked_evaluated_supported=unmasked_total,
+                  residual_evaluated_supported=residual_total,
                   hosts_covered=len(covered),
-                  member_assignments=sum(g["size"] for g in groups))
+                  member_assignments=sum(g["size"] for g in groups),
+                  **overlap_stats(groups, covered))
     return groups, report

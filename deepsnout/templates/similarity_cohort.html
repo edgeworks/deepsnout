@@ -10,7 +10,9 @@
 <section class="panel"><h2>Why these hosts were selected</h2>
   <p>{{ group.description }}</p>
   <p><strong>Recurring applications:</strong> {{ group.anchors|join(' + ') }}</p>
-  <p><strong>Additional supporting views:</strong> {{ group.supporting_views|join(', ') if group.supporting_views else 'None observed' }}</p>
+  <p><strong>Residual supporting views:</strong> {{ group.supporting_views|join(', ') if group.supporting_views else 'None measured' }}</p>
+  <p><strong>Matched outside-control pairs:</strong>
+     {{ group.residual_matched_pairs|default(0) }} / {{ group.residual_sampled_pairs|default(0) }}</p>
   <p><strong>Median observed days:</strong> {{ group.median_observed_days }}</p>
 </section>
 <section class="panel"><h2>Sampled behavioral similarity versus fleet</h2>
@@ -22,6 +24,17 @@
   <td>{{ score.fleet if score.fleet is not none else 'n/a' }}</td>
   <td>{{ score.delta if score.delta is not none else 'n/a' }}</td>
   <td>{{ score.within_pairs }} / {{ score.fleet_pairs }}</td></tr>
+  {% endfor %}</tbody></table>
+</section>
+<section class="panel"><h2>Residual behavioral comparison</h2>
+  <p class="muted">Process/network evidence directly attributable to seed executables is removed before comparing inside hosts with outside controls matched by telemetry depth. Other suite-related features may remain; this is not an out-of-sample validation.</p>
+  <table><thead><tr><th>Channel</th><th>Within</th><th>Matched control</th><th>Difference</th><th>Pairs</th></tr></thead>
+  <tbody>{% for channel, score in group.residual_quality|default({})|dictsort %}
+  <tr><td>{{ channel }}</td>
+  <td>{{ score.within if score.within is not none else 'n/a' }}</td>
+  <td>{{ score.matched_control if score.matched_control is not none else 'n/a' }}</td>
+  <td>{{ score.delta if score.delta is not none else 'n/a' }}</td>
+  <td>{{ score.comparable_pairs }}</td></tr>
   {% endfor %}</tbody></table>
 </section>
 <section class="panel"><h2>Members</h2>

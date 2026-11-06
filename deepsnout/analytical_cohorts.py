@@ -218,10 +218,32 @@ def anonymized_cohort_metrics(state, suggestions=None):
                        "supported_groups": item.get("supported_groups", 0),
                        "hosts_covered": item.get("hosts_covered", 0),
                        "member_assignments": item.get("member_assignments", 0),
+                       "unmasked_evaluated_supported": item.get(
+                           "unmasked_evaluated_supported", 0),
+                       "residual_evaluated_supported": item.get(
+                           "residual_evaluated_supported", 0),
+                       "hosts_with_multiple_memberships": item.get(
+                           "hosts_with_multiple_memberships", 0),
+                       "max_memberships_per_host": item.get(
+                           "max_memberships_per_host", 0),
+                       "mean_memberships_per_covered_host": item.get(
+                           "mean_memberships_per_covered_host", 0),
+                       "member_multiplicity": item.get("member_multiplicity", {}),
+                       "group_pairs_over_50pct_jaccard": item.get(
+                           "group_pairs_over_50pct_jaccard", 0),
+                       "group_pairs_over_75pct_jaccard": item.get(
+                           "group_pairs_over_75pct_jaccard", 0),
+                       "max_group_overlap_jaccard": item.get(
+                           "max_group_overlap_jaccard", 0),
                        "group_details": [
                            {"size": group["size"], "status": group["status"],
                             "days_median": group["median_observed_days"],
                             "supporting_dimensions": group["supporting_views"],
+                            "unmasked_supporting_dimensions": group.get(
+                                "unmasked_supporting_views", []),
+                            "residual_sampled_pairs": group.get("residual_sampled_pairs", 0),
+                            "residual_matched_pairs": group.get("residual_matched_pairs", 0),
+                            "residual_quality": group.get("residual_quality", {}),
                             "similarity": {
                                 channel: {"within": val["within"],
                                           "fleet": val["fleet"], "delta": val["delta"],
