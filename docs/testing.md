@@ -8,6 +8,12 @@ generation. This is NOT verification of real telemetry quality, five-thousand-ho
 runtime, PostgreSQL storage throughput, or memory performance. The new code
 requires a fresh CI run and operator validation after Splunk catch-up.
 
+The new application-pair shadow discovery has synthetic tests for actual shared
+features, absent corroborating behavior, sparse history and deterministic
+5,000-host input. No production dataset or endpoint telemetry was uploaded
+or executed externally. These tests do not establish grouping quality or
+full-fleet capacity on the user's infrastructure.
+
 The quality-diagnostic follow-up measures capped within-cohort versus fleet
 feature-set overlap in four independent views. Synthetic tests verify that
 identical feature counts cannot masquerade as identical features, empty

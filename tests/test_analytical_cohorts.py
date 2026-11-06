@@ -128,3 +128,18 @@ def test_counts_only_report_contains_no_identifiers_or_features(db):
     assert "legacy_unreviewed_group_sizes" in report
     assert report["namespace_statistics"][0]["hosts_known"] == 6
     assert sum(report["namespace_statistics"][0]["observed_day_bands"].values()) == 6
+
+
+
+def test_similarity_snapshot_does_not_change_detector_memberships(db):
+    seed_two_groups(db, [1, 2, 3, 4, 5, 6, 7, 8])
+    before = [h.cohort for h in db.query(Host).order_by(Host.id)]
+    report = refresh_peer_groups(db, clock=DAY_START + 3600)
+    assert "behavioral_similarity_cohorts" in report
+    assert before == [h.cohort for h in db.query(Host).order_by(Host.id)]
+    state = analytical_cohort_state(db)
+    assert "similarity_groups" in state
+    assert "similarity_summaries" in state
+    safe = anonymized_cohort_metrics(state)
+    assert "default" not in str(safe)
+    assert "cad" not in str(safe)

@@ -206,6 +206,34 @@ def anonymized_cohort_metrics(state, suggestions=None):
             ],
         })
     result = {"algorithm": state.get("algorithm", ALGORITHM),
+              "behavioral_similarity": {
+                  "algorithm": state.get("similarity_algorithm"),
+                  "populations": [
+                      {"hosts_profiled": item.get("hosts_profiled", 0),
+                       "hosts_eligible": item.get("hosts_eligible", 0),
+                       "min_group_size": item.get("min_group_size", 20),
+                       "candidate_pairs": item.get("candidate_pairs", 0),
+                       "quality_evaluated": item.get("quality_evaluated", 0),
+                       "groups": item.get("groups", 0),
+                       "supported_groups": item.get("supported_groups", 0),
+                       "hosts_covered": item.get("hosts_covered", 0),
+                       "member_assignments": item.get("member_assignments", 0),
+                       "group_details": [
+                           {"size": group["size"], "status": group["status"],
+                            "days_median": group["median_observed_days"],
+                            "supporting_dimensions": group["supporting_views"],
+                            "similarity": {
+                                channel: {"within": val["within"],
+                                          "fleet": val["fleet"], "delta": val["delta"],
+                                          "within_pairs": val["within_pairs"],
+                                          "fleet_pairs": val["fleet_pairs"]}
+                                for channel, val in group["quality"].items()}}
+                           for group in state.get("similarity_groups", [])
+                           if group.get("namespace") == item.get("namespace")
+                       ]}
+                      for item in state.get("similarity_summaries", [])
+                  ],
+              },
               "quality_method": "sampled-weighted-jaccard-v1",
               "quality_pair_budget_per_cohort": MAX_QUALITY_PAIRS,
               "namespace_statistics": summary_rows}

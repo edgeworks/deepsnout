@@ -410,6 +410,23 @@ def create_app(config=None):
             return JSONResponse(anonymized_cohort_metrics(analytical_cohort_state(db),
                                                         suggestion_state(db)))
 
+    @app.get("/peer-groups/similarity/{identifier}")
+    def similarity_detail_page(request: Request, identifier: str, q: str = ""):
+        with transaction(engine) as db:
+            user = login_user(request, db)
+            group = next((g for g in analytical_cohort_state(db).get("similarity_groups", [])
+                          if g.get("id") == identifier), None)
+            if not group:
+                raise HTTPException(404, "Similarity cohort not found")
+            ids = group.get("members", [])
+            query = (select(Host).where(Host.id.in_(ids)) if ids
+                     else select(Host).where(Host.id == "__none__"))
+            if q:
+                query = query.where(Host.name.ilike("%" + q[:100] + "%"))
+            members = db.scalars(query.order_by(Host.name).limit(500)).all()
+            return view(request, "similarity_cohort.html", user=user, group=group,
+                        members=members, q=q)
+
     @app.get("/peer-groups/automatic/{identifier}")
     def analytical_detail_page(request: Request, identifier: str, q: str = ""):
         with transaction(engine) as db:

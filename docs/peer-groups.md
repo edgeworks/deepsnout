@@ -1,5 +1,33 @@
 # Peer groups
 
+## Experimental behavioral similarity cohorts (shadow only)
+
+Discovery starts with **which applications are shared**, not how many each
+host executes. Hosts with at least seven observed days are eligible. Very rare
+and nearly ubiquitous non-Windows applications are excluded as seeds; recurring
+application pairs form bounded candidates. Candidates require at least 20 hosts
+or 1% of eligible hosts, whichever is greater. Near-identical memberships are
+deduplicated. At most 80 groups are scored and 32 displayed per namespace.
+
+A group's application overlap is high by construction, not validation. Each
+candidate is compared with a fleet reference using up to 160 sampled host pairs
+for application, process, network and activity similarity. "Supported" requires
+app delta >=0.10 plus process or network delta >=0.08 with adequate pair counts.
+These process/network features may also derive from the same applications; the
+term means preliminary cross-view support, not proof of meaningful peers,
+statistical significance, a benign verdict or an ability to suppress alerts.
+"Exploratory" candidates are also shown. Groups may overlap and full coverage
+is not forced. Unqualified hosts remain ungrouped.
+
+These groups are read-only, automatically refreshed and stored alongside the
+previous breadth strata in application state. They never change Host.cohort,
+findings, detectors, approved groups or suppression policy. The authenticated
+internal UI shows the seed applications, while counts-only metrics at
+/api/peer-groups/metrics exclude application and host identities.
+No schema change is required. The method cannot find peer groups lacking
+recurring shared applications, and synthetic 5,000-host tests are not a
+real-world benchmark. This is exploratory, not finished clustering.
+
 ## Automatic analytical cohorts (shadow only)
 
 The new comparison cohorts are **overlapping, automatically refreshed and

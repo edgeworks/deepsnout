@@ -25,6 +25,8 @@ from sqlalchemy import select, func
 from .db import State, Host, BehaviorDay, Window, now, set_state
 from .analytical_cohorts import (ALGORITHM as ANALYTICAL_ALGORITHM,
                                 discover_analytical_cohorts, assess_cohort_quality)
+from .similarity_cohorts import (
+    ALGORITHM as SIMILARITY_ALGORITHM, discover_similarity_cohorts)
 
 DAY = 86400
 MAX_REFERENCE_DAYS = 28
@@ -595,7 +597,12 @@ def _discover_namespace(db, namespace, clock, progress=None):
     if n < 3:
         return [], {"namespace": namespace, "hosts_profiled": n, "hosts_known": len(hosts),
                     "observed_days": namespace_days, "observed_day_bands": {},
-                    "includes_current_day": includes_current_day, "recommended": 0, "technical": 0}, []
+                    "includes_current_day": includes_current_day, "recommended": 0, "technical": 0}, [], [], {
+                        "namespace": namespace, "hosts_profiled": n,
+                        "hosts_eligible": 0, "min_group_size": 20,
+                        "candidate_pairs": 0, "quality_evaluated": 0,
+                        "groups": 0, "supported_groups": 0,
+                        "hosts_covered": 0, "member_assignments": 0}
 
     peer_edges = []
     _progress(progress, "peer-candidates", namespace=namespace, hosts=n)
@@ -649,6 +656,12 @@ def _discover_namespace(db, namespace, clock, progress=None):
     automatic, _ = discover_analytical_cohorts(namespace, profiles, includes_current_day, clock)
     _progress(progress, "analytical-quality", namespace=namespace, groups=len(automatic))
     assess_cohort_quality(profiles, automatic)
+    _progress(progress, "behavioral-similarity", namespace=namespace, hosts=n)
+    similarity, similarity_summary = discover_similarity_cohorts(
+        namespace, profiles, includes_current_day, clock)
+    _progress(progress, "behavioral-similarity", namespace=namespace,
+              candidates=similarity_summary["candidate_pairs"],
+              selected=len(similarity), supported=similarity_summary["supported_groups"])
     observed_day_bands = {"1-2": 0, "3-6": 0, "7-13": 0, "14+": 0}
     for profile in profiles.values():
         observed = profile["observed_days"]
@@ -664,7 +677,7 @@ def _discover_namespace(db, namespace, clock, progress=None):
         "includes_current_day": includes_current_day,
         "recommended": sum(group["peer_suitability"] == "recommended" for group in groups),
         "technical": sum(group["peer_suitability"] == "technical" for group in groups),
-    }, automatic
+    }, automatic, similarity, similarity_summary
 
 
 def refresh_peer_groups(db, clock=None, progress=None):
@@ -676,6 +689,7 @@ def refresh_peer_groups(db, clock=None, progress=None):
     namespaces = db.scalars(select(Host.namespace).distinct()).all()
     suggestions, summaries = [], []
     analytical_groups, analytical_summaries = [], []
+    similarity_groups, similarity_summaries = [], []
     matched_auto = set()
 
     by_fingerprint = {value.get("fingerprint"): (key, value) for key, value in registry.items()
@@ -683,8 +697,11 @@ def refresh_peer_groups(db, clock=None, progress=None):
 
     for namespace in namespaces:
         _progress(progress, "namespace-start", namespace=namespace)
-        groups, summary, automatic = _discover_namespace(db, namespace, clock, progress=progress)
+        groups, summary, automatic, similar, similar_report = _discover_namespace(
+            db, namespace, clock, progress=progress)
         summaries.append(summary)
+        similarity_groups.extend(similar)
+        similarity_summaries.append(similar_report)
         analytical_groups.extend(automatic)
         covered = set().union(*(set(g["members"]) for g in automatic)) if automatic else set()
         analytical_summaries.append({
@@ -725,6 +742,9 @@ def refresh_peer_groups(db, clock=None, progress=None):
     set_state(db, "analytical_cohorts", {
         "algorithm": ANALYTICAL_ALGORITHM, "updated_at": clock,
         "groups": analytical_groups, "summaries": analytical_summaries,
+        "similarity_algorithm": SIMILARITY_ALGORITHM,
+        "similarity_groups": similarity_groups,
+        "similarity_summaries": similarity_summaries,
     })
     set_state(db, "peer_group_registry", {"groups": registry, "updated_at": clock})
     learning = any(item.get("includes_current_day") or item.get("observed_days", 0) < 7 for item in summaries)
@@ -734,6 +754,9 @@ def refresh_peer_groups(db, clock=None, progress=None):
     _progress(progress, "finalizing", namespaces=len(summaries), suggestions=len(suggestions))
     return {"suggestions": len(suggestions), "approved_auto_matched": len(matched_auto),
             "analytical_cohorts": len(analytical_groups),
+            "behavioral_similarity_cohorts": len(similarity_groups),
+            "behavioral_similarity_supported": sum(g["status"] == "supported"
+                                                   for g in similarity_groups),
             "analytical_covered_hosts": sum(s["hosts_covered"] for s in analytical_summaries),
             "namespaces": len(summaries), "learning": learning,
             "recommended": sum(group.get("peer_suitability") == "recommended" for group in suggestions),
