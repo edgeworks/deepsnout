@@ -151,19 +151,32 @@ def _add_feature(store, host_id, channel, feature, day):
     store[host_id][channel][feature] |= 1 << (int(day) % 64)
 
 
-def _namespace_profiles(db, namespace, clock, progress=None):
-    """Build multi-channel endpoint profiles for one source namespace."""
+def _namespace_profiles(db, namespace, clock, progress=None, *, day_start=None, day_end=None):
+    """Build profiles for an optional explicit historical date range.
+
+    Without explicit boundaries, normal discovery retains its existing
+    provisional current-day behavior. Explicit ranges are strictly confined
+    to completed UTC days in the most recent 28-day period.
+    """
     current_day = int(clock) // DAY
-    first_day = current_day - (MAX_REFERENCE_DAYS - 1)
+    if day_start is not None or day_end is not None:
+        if (day_start is None or day_end is None
+                or not current_day - MAX_REFERENCE_DAYS <= day_start <= day_end < current_day):
+            raise ValueError("Explicit windows must be completed UTC days within the last 28")
+        first_day, allowed_end = day_start, day_end
+        includes_current_day = False
+    else:
+        first_day = current_day - (MAX_REFERENCE_DAYS - 1)
+        have_completed_day = db.scalar(select(BehaviorDay.id).join(Host).where(
+            Host.namespace == namespace, BehaviorDay.day >= first_day,
+            BehaviorDay.day < current_day).limit(1)) is not None
+        allowed_end = current_day - 1 if have_completed_day else current_day
+        includes_current_day = not have_completed_day
+
     host_rows = db.scalars(select(Host).where(Host.namespace == namespace)).all()
     hosts = {host.id: host for host in host_rows}
     if len(hosts) < 3:
-        return {}, {}, hosts, {}, False, 0
-
-    have_completed_day = db.scalar(select(BehaviorDay.id).join(Host).where(
-        Host.namespace == namespace, BehaviorDay.day >= first_day,
-        BehaviorDay.day < current_day).limit(1)) is not None
-    allowed_end = current_day - 1 if have_completed_day else current_day
+        return {}, {}, hosts, {}, includes_current_day, 0
 
     feature_days = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     host_days = defaultdict(set)
@@ -232,7 +245,7 @@ def _namespace_profiles(db, namespace, clock, progress=None):
 
     n = len(raw)
     if n < 3:
-        return {}, raw, hosts, {}, not have_completed_day, max((len(v) for v in host_days.values()), default=0)
+        return {}, raw, hosts, {}, includes_current_day, max((len(v) for v in host_days.values()), default=0)
 
     # Discover recurring application pairs. These are deliberately derived from a
     # broader application footprint rather than from the highest-IDF individual app.
@@ -305,7 +318,7 @@ def _namespace_profiles(db, namespace, clock, progress=None):
             "observed_days": len(host_days[host_id]),
         }
 
-    return profiles, raw, hosts, fleet_df, not have_completed_day, max((len(v) for v in host_days.values()), default=0)
+    return profiles, raw, hosts, fleet_df, includes_current_day, max((len(v) for v in host_days.values()), default=0)
 
 
 def _peer_scores(left, right):

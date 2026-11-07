@@ -1,6 +1,7 @@
 """Container entry points and host-admin recovery; normal work uses the GUI."""
 import argparse
 import getpass
+import json
 import logging
 import os
 import sys
@@ -13,7 +14,7 @@ from .security import initialize_secrets, validate_password, PASSWORDS
 
 def main():
     parser = argparse.ArgumentParser(prog="deepsnout")
-    parser.add_argument("command", choices=["secrets", "init", "serve", "worker", "setup-token", "worker-health", "reset-password", "version"])
+    parser.add_argument("command", choices=["secrets", "init", "serve", "worker", "setup-token", "worker-health", "reset-password", "version", "validate-cohorts"])
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--username")
@@ -57,7 +58,12 @@ def main():
                     proxy_headers=False, server_header=False, access_log=False)
         return
     engine = make_engine(config)
-    if args.command == "init":
+    if args.command == "validate-cohorts":
+        from .temporal_validation import run_temporal_shadow_validation
+        with transaction(engine) as db:
+            report = run_temporal_shadow_validation(db, clock=now())
+        print(json.dumps(report, indent=2, sort_keys=True))
+    elif args.command == "init":
         initialize(engine)
         print("Database schema ready. Retrieve the setup token and open the GUI.")
     elif args.command == "worker":
