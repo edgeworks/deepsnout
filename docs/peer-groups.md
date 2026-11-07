@@ -39,6 +39,25 @@ No schema change is required. The method cannot find peer groups lacking
 recurring shared applications, and synthetic 5,000-host tests are not a
 real-world benchmark. This is exploratory, not finished clustering.
 
+### Shadow peer-reference selection (0.1.0a20)
+
+The read-only historical validation JSON now includes
+`shadow_reference_pools`. Based on *training-screened* groups that
+retain residual process/network evidence during a disjoint later period,
+it prioritizes at most one comparison population for each eligible
+host and view (process or network). The output reports counts only,
+with two heuristic sensitivity scenarios: minimum residual similarity
+advantages 0.08 and 0.12. It does not recruit new group members based
+on later application features, and it does not treat 20 overlapping
+technical populations as 20 independent reasons to suppress an alert.
+
+These are prospective *candidates* selected using the later period, not
+proven detector peers. The existing DS-EXEC-002 application-specific
+qualified-peer count and context prevalence are not computed here.
+No finding is suppressed, no analyst approval or group assignment is
+changed, and the CLI remains read-only. Future work will evaluate
+detector-specific selection on genuinely later observations.
+
 ### Read-only retrospective holdout (0.1.0a19)
 
 Run `docker compose exec -T worker deepsnout validate-cohorts` on the trusted

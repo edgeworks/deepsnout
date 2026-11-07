@@ -1,4 +1,28 @@
-# Verification report - 0.1.0a19
+# Verification report - 0.1.0a20
+
+## Shadow reference-pool prioritization (0.1.0a20)
+
+A pure helper now uses frozen historical group membership and a disjoint
+later-window comparison to select at most one preferred reference group
+per host for process behavior and one for network behavior. Only groups
+with training and later residual support are eligible. Reports show both
+the existing 0.08 residual-advantage cutoff and a stricter 0.12 sensitivity
+scenario. These are heuristic screening margins, not calibrated security
+thresholds or validated detector quality.
+
+The read-only `deepsnout validate-cohorts` command prints only aggregate
+counts: the number of hosts with a preferred process/network comparison
+population, the number of distinct groups used, and how many overlapping
+candidate assignments are reduced. No user/group/host identifiers are
+exposed. Application-specific peer eligibility and same-context prevalence
+are NOT calculated. This is NOT enabled in detector code, and cannot
+suppress findings. Tests use only synthetic populations with overlapping
+memberships and confirm missing validation evidence fails closed.
+
+The manual report is retrospective: using its holdout evidence to select
+future reference candidates is not independent evaluation of those
+selections. The next milestone should assess detector-context relevance
+on a genuinely later observation window before promoting any policy.
 
 ## Release and historical validation (0.1.0a19)
 
@@ -53,7 +77,7 @@ against the production PostgreSQL instance.
 
 ## Automated verification
 
-The 0.1.0a19 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a20 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.

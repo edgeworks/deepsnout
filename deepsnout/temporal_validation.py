@@ -11,6 +11,7 @@ from .db import Host
 from .peer_groups import DAY, MAX_REFERENCE_DAYS, _namespace_profiles
 from .similarity_cohorts import ALGORITHM, discover_similarity_cohorts
 from .similarity_validation import assess_residual_quality
+from .shadow_peer_selection import shadow_peer_selection_summary
 
 TRAINING_DAYS = 21
 HOLDOUT_DAYS = 7
@@ -72,6 +73,8 @@ def evaluate_temporal_cohorts(namespace, training_profiles, later_profiles, cloc
             row["observed_later"] >= MIN_GROUP_MEMBERS for row in rows),
         "groups_with_later_residual_support": sum(
             row["later_residual_support"] for row in rows),
+        "shadow_reference_pools": shadow_peer_selection_summary(
+            groups, rows, later, minimum_later_days=MIN_LATER_DAYS),
         "groups": rows,
     }
 

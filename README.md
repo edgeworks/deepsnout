@@ -176,6 +176,17 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## Shadow peer-reference evaluation
+
+Version 0.1.0a20 extends the read-only `deepsnout validate-cohorts`
+command with a counts-only `shadow_reference_pools` summary.
+It compares two exploratory residual similarity thresholds, prioritizes
+at most one process and one network reference population per host,
+and reports remaining candidate coverage and membership redundancy.
+No live detector is changed or allowed to suppress based on this output.
+The output does not yet verify application-specific DS-EXEC-002 peer
+qualification or future detector accuracy.
+
 ## Read-only historical cohort evaluation
 
 To evaluate exploratory comparison cohorts on non-overlapping historical
