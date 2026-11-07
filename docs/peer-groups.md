@@ -39,6 +39,24 @@ No schema change is required. The method cannot find peer groups lacking
 recurring shared applications, and synthetic 5,000-host tests are not a
 real-world benchmark. This is exploratory, not finished clustering.
 
+### Read-only retrospective holdout (0.1.0a19)
+
+Run `docker compose exec -T worker deepsnout validate-cohorts` on the trusted
+deployment. The command trains groups on the older 21 of the previous 28
+completed UTC days and assesses their frozen membership on the subsequent
+seven completed days. At least three observed holdout days per host are
+required for comparison; a group needs at least 12 such hosts. The same
+anchor-excluded process/network assessment is performed against outside
+controls matched on observation depth. "Later residual support" also requires
+at least 50% of observed members to retain both seed applications.
+
+The printed JSON reports only aggregated counts and similarities, not
+namespace labels, hostnames, seed executables or group IDs. The command does
+not persist a result, alter approved or shadow groups, change detections or
+introduce suppression. It can add considerable database read load, so run
+outside active ingestion catch-up. This is a retrospective split-window test,
+not a prospective field trial, statistical proof or a benign verdict.
+
 ## Automatic analytical cohorts (shadow only)
 
 The new comparison cohorts are **overlapping, automatically refreshed and

@@ -4,6 +4,10 @@ Read docs/product-brief.md and docs/design.md. Keep Python approachable, evidenc
 explainable, state bounded and core analysis independent of outside services.
 Avoid new telemetry or model complexity without measured analyst value.
 
+Bump `deepsnout/__init__.py` and `pyproject.toml` together for each
+release. The GUI displays the package version; the automated version test
+must pass before publication.
+
 Use Python3.12+ and `pip install -e '.[test]'`, then `python -m pytest`. Add synthetic
 fixtures and regressions for source and detector changes; never commit customer
 telemetry or credentials. Preserve source time, attribution, idempotency and

@@ -10,6 +10,10 @@ original timestamps, exact process attribution, prior-day references, bounded
 state and visible uncertainty are invariants. Do not invent causal chains, call
 an anomaly score a compromise probability, or silently truncate source results.
 
+For every deployable release, bump BOTH `deepsnout/__init__.py` and
+`pyproject.toml`, keep the release heading in `docs/testing.md` aligned,
+and run the version-consistency test. The GUI displays __version__.
+
 Run `python -m pytest`. The PostgreSQL test fixture DROPS TABLES: use only a
 disposable test DB. Do not publish customer telemetry/secrets or committed instance
 state. Add migrations before changing a deployed schema. Maintain a runnable

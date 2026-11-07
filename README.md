@@ -176,6 +176,19 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## Read-only historical cohort evaluation
+
+To evaluate exploratory comparison cohorts on non-overlapping historical
+periods in your own deployment, run:
+
+`docker compose exec -T worker deepsnout validate-cohorts`
+
+It learns groups from 21 completed UTC days and evaluates frozen members on
+seven subsequent completed days. Only aggregate counts and similarity
+metrics are printed. The manual command does not write to the database,
+modify detectors or approve groups; it adds database read load, so avoid
+active ingestion catch-up periods.
+
 ## Deliberate boundaries
 
 No SSO/MFA, automated remediation, long-term exact IOC inventory, alert email
