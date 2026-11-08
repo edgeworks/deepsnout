@@ -15,6 +15,11 @@ def seed_fleet(db, *, count=50, namespace="default", days=1):
         db.add(Host(id=hid, name=hostname, namespace=namespace,
                     first_seen=DAY_START-days*DAY+3600,
                     last_seen=DAY_START-DAY+3600, cohort="unassigned"))
+    # SQLAlchemy has no ORM relationships declaring the insert dependency;
+    # flush parent hosts before inserting child coverage/behavior rows.
+    db.flush()
+    for i in range(count):
+        hid = host_key(namespace, f"fleet-{i:03d}.example")
         for offset in range(1, days+1):
             day = DAY_START // DAY - offset
             db.add(Coverage(id=digest(hid, day, 1), host_id=hid,
