@@ -65,6 +65,17 @@ segment is masked; it is not comprehensive PII redaction. Restrict access/backup
 Normalized queued imports retain compact records until success, then payloads are
 cleared. Failed payloads expire with their job after seven days.
 
+## Diagnostic visibility for environment discovery (v0.1.0a22)
+
+The environment-relative detector now maintains a seven-day, counts-only
+processing-time funnel. Accepted Sysmon process creates can be distinguished
+from historical backfill, older-than-24h events and recent events. The
+recent events are classified by local history, observed context familiarity,
+available fleet reference, and rarity-candidate outcome. Updates are
+transactional with ingestion, with no host, namespace or executable fields
+in the aggregate. This does not rewrite previous history or change which
+events produce findings. Counts are events, not unique hosts.
+
 ## Environment-relative novelty beyond signatures (v0.1.0a21)
 
 The independent DS-BEH-001 event-time discovery path flags a locally new

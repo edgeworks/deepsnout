@@ -176,6 +176,19 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## Understanding zero findings
+
+From v0.1.0a22, the authenticated
+`/api/behavioral-discovery/metrics` endpoint includes a counts-only
+`evaluation_pipeline_last_7d` section. It shows how many accepted
+process-create events were historical, older than the live finding horizon,
+recent, stopped by local-history/familiarity or fleet-coverage checks, or
+identified as candidates for a rarity finding. This diagnostic is useful
+even when `findings_total` is zero: an empty detection inbox does not
+prove that no eligible process events were assessed. The numbers count
+accepted events, not unique hosts, and begin accumulating after the
+updated build is deployed. No detector behavior is relaxed.
+
 ## Environment-relative anomaly discovery
 
 In v0.1.0a21, DS-BEH-001 discovers rare application execution and uncommon

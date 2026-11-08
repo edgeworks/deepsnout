@@ -712,9 +712,25 @@ def create_app(config=None):
                 Finding.detector == "DS-BEH-001",
                 Finding.created >= now() - 7 * 86400)) or 0)
             cfg = policy(db)
+            state = db.get(State, "behavioral_discovery_pipeline")
+            pipeline = state.value if state else {}
+            today = int(now()) // 86400
+            seven_days = {}
+            for bucket_day, counters in pipeline.get("by_day", {}).items():
+                if (not isinstance(counters, dict)
+                        or not str(bucket_day).lstrip("-").isdigit()
+                        or not today - 6 <= int(bucket_day) <= today):
+                    continue
+                for label, count in counters.items():
+                    if isinstance(count, int) and not isinstance(count, bool):
+                        seven_days[label] = seven_days.get(label, 0) + count
             return {
                 "detector": "DS-BEH-001",
                 "behavioral_enabled": cfg.behavioral_enabled,
+                "evaluation_pipeline_last_7d": seven_days,
+                "evaluation_last_updated": pipeline.get("last_updated"),
+                "evaluation_window": "last seven processing UTC days, including today",
+                "evaluation_counts_are_events_not_distinct_hosts": True,
                 "findings_total": sum(by_state.values()),
                 "findings_last_7d": seven_days,
                 "by_state": by_state,

@@ -136,3 +136,55 @@ def test_peer_reference_is_evidence_and_cannot_dismiss_outlier(db):
     assert peers["application_qualified_peers"] == 12
     assert peers["peers_with_same_parent_and_location"] == 0
     assert peers["use_for_suppression"] is False
+
+
+
+def test_accepted_process_creates_explain_finding_pipeline(db):
+    from deepsnout.db import State
+    seed_fleet(db)
+    baseline_report = ingest(db, baseline("subject"), clock=CLOCK)
+    assert baseline_report["behavioral_pipeline"]["event1_outside_live_horizon"] >= 7
+    record = evt(host="subject", n=991, Image=r"C:\Tools\unusual.exe")
+    report = ingest(db, [record], clock=CLOCK)
+    counters = report["behavioral_pipeline"]
+    assert counters["event1_accepted"] == 1
+    assert counters["event1_recent"] == 1
+    assert counters["locally_new_with_established_history"] == 1
+    assert counters["fleet_reference_eligible"] == 1
+    assert counters["rare_application_candidates"] == 1
+    state = db.get(State, "behavioral_discovery_pipeline").value
+    day = str(int(CLOCK) // DAY)
+    assert state["by_day"][day]["rare_application_candidates"] == 1
+    assert "subject" not in str(state)
+    assert "unusual.exe" not in str(state)
+
+
+def test_duplicate_batch_does_not_inflate_diagnostic_counters(db):
+    from deepsnout.db import State
+    seed_fleet(db)
+    event = evt(host="one-new-host", n=992)
+    first = ingest(db, [event], batch_id="test-counters-id", clock=CLOCK)
+    before = dict(db.get(State, "behavioral_discovery_pipeline").value)
+    replay = ingest(db, [event], batch_id="test-counters-id", clock=CLOCK)
+    assert first["behavioral_pipeline"]["event1_recent"] == 1
+    assert replay["batch_replay"] is True
+    assert db.get(State, "behavioral_discovery_pipeline").value == before
+
+
+def test_disabled_detector_still_reports_live_ingest(db):
+    seed_fleet(db)
+    current = policy(db)
+    current.behavioral_enabled = False
+    set_state(db, "policy", current.model_dump())
+    report = ingest(db, [evt(host="test-new", n=993)], clock=CLOCK)
+    assert report["behavioral_pipeline"]["event1_recent"] == 1
+    assert report["behavioral_pipeline"]["detector_disabled"] == 1
+
+
+def test_learning_and_familiar_context_are_counted(db):
+    seed_fleet(db)
+    report = ingest(db, [evt(host="new-host", n=994)], clock=CLOCK)
+    assert report["behavioral_pipeline"]["insufficient_local_history"] == 1
+    ingest(db, baseline("subject"), clock=CLOCK)
+    report = ingest(db, [evt(host="subject", n=995)], clock=CLOCK)
+    assert report["behavioral_pipeline"]["locally_familiar_context"] == 1

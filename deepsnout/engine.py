@@ -8,7 +8,8 @@ import math
 import statistics
 from sqlalchemy import select, func, delete, update
 from .db import (Host, Coverage, Seen, BatchReceipt, Process, BehaviorDay, Window,
-                 Finding, Expectation, Job, Audit, LoginSession, policy, now, set_state)
+                 Finding, Expectation, Job, Audit, LoginSession, State,
+                 policy, now, set_state)
 from .normalize import digest, VERSION
 from .features import Diversity, service_group
 from .peer_groups import peer_group_suppression_allowed
@@ -117,7 +118,7 @@ def execution_findings(db, host, process, cfg, clock, *, environment_cache=None)
     # A distinct environment-relative discovery lens: no known TTP, fixed
     # suspicious-executable list or outbound network event is required.
     # Evaluate once for event 1, not on every later ProcessGuid network join.
-    if environment_cache is not None and cfg.behavioral_enabled:
+    if environment_cache is not None:
         novelty = environment_novelty(
             db, host, process.app, meta.get("parent", "unknown"),
             process.location, ref, process.created, cfg, environment_cache)
@@ -186,7 +187,8 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                             "The batch/checkpoint was not committed.")
     hosts, processes, coverage, behaviors, windows, sketches = {}, {}, {}, {}, {}, {}
     refs, context_counts = {}, {}
-    environment_cache = {}
+    environment_cache = {"behavioral_counts": {}}
+    behavioral_counts = environment_cache["behavioral_counts"]
     historical_ref_keys = set()
     ids = [digest(namespace, e.id) for e in events]
     known = set()
@@ -271,6 +273,15 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                 db.add(coverage[ckey])
         coverage[ckey].count += 1
         report["accepted"] += 1
+        if e.event_id == 1:
+            behavioral_counts["event1_accepted"] = behavioral_counts.get("event1_accepted", 0) + 1
+            if historical:
+                reason = "event1_historical_batch"
+            elif e.ts < clock - DAY:
+                reason = "event1_outside_live_horizon"
+            else:
+                reason = "event1_recent"
+            behavioral_counts[reason] = behavioral_counts.get(reason, 0) + 1
         report["warnings"] += len(e.warnings)
         report["missing_guid"] += int(not e.guid)
         proc = None
@@ -391,6 +402,30 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
         w.sketch, w.distinct_count = sketch.encode(), sketch.estimate()
     if batch_id:
         db.add(BatchReceipt(id=batch_id, namespace=namespace, received=clock))
+    # Persist only aggregated, non-identifying gate counts, transactionally
+    # with the accepted observations. This prevents "0 findings" from being
+    # mistaken for "no process events evaluated". Keep seven processing UTC days.
+    if behavioral_counts:
+        report["behavioral_pipeline"] = dict(behavioral_counts)
+        current_day = int(clock) // DAY
+        state = db.get(State, "behavioral_discovery_pipeline")
+        previous = (state.value.get("by_day", {}) if state and
+                    isinstance(state.value, dict) else {})
+        retained = {}
+        for key, row in previous.items():
+            if not isinstance(row, dict):
+                continue
+            try:
+                day_number = int(key)
+            except (ValueError, TypeError):
+                continue
+            if current_day - 6 <= day_number <= current_day:
+                retained[str(day_number)] = dict(row)
+        today = retained.setdefault(str(current_day), {})
+        for label, count in behavioral_counts.items():
+            today[label] = int(today.get(label, 0)) + count
+        set_state(db, "behavioral_discovery_pipeline", {
+            "schema": 1, "by_day": retained, "last_updated": clock})
     db.flush()
     set_state(db, "last_ingest", {**report, "at": clock, "namespace": namespace})
     return report

@@ -20,6 +20,12 @@ UNKNOWN_PARENTS = {"", "unknown"}
 MAX_COHORT_MEMBERS = 500
 
 
+def _record(cache, reason):
+    """Anonymous count of why an accepted EID 1 did or did not qualify."""
+    counters = cache.setdefault("behavioral_counts", {})
+    counters[reason] = counters.get(reason, 0) + 1
+
+
 def _count(db, query):
     return int(db.scalar(query) or 0)
 
@@ -151,14 +157,26 @@ def environment_novelty(db, host, app, parent, location, ref, ts, cfg, cache):
     A minimum of local and fleet reference observations limits cold-start
     noise. A rare event may still be completely legitimate.
     """
-    if (not cfg.behavioral_enabled or ref.get("confidence") != "established"
-            or not ref.get("local_new") or app in UNKNOWN_APPS):
+    if not cfg.behavioral_enabled:
+        _record(cache, "detector_disabled")
         return None
+    if ref.get("confidence") != "established":
+        _record(cache, "insufficient_local_history")
+        return None
+    if not ref.get("local_new"):
+        _record(cache, "locally_familiar_context")
+        return None
+    if app in UNKNOWN_APPS:
+        _record(cache, "unknown_application")
+        return None
+    _record(cache, "locally_new_with_established_history")
     day = int(ts) // DAY
     first = day - cfg.baseline_days
     fleet = _host_count(db, host.namespace, first, day, cache)
     if fleet < cfg.behavioral_min_fleet_hosts:
+        _record(cache, "insufficient_fleet_coverage")
         return None
+    _record(cache, "fleet_reference_eligible")
     app_hosts = _app_support(db, host.namespace, app, first, day, cache)
     rare_max = max(2, math.floor(fleet * cfg.behavioral_rare_app_fraction))
     common_min = max(cfg.behavioral_min_common_app_hosts,
@@ -174,7 +192,10 @@ def environment_novelty(db, host, app, parent, location, ref, ts, cfg, cache):
         relation_max = max(2, math.floor(app_hosts * cfg.behavioral_rare_relation_fraction))
         rare_relation = pattern_hosts <= relation_max
     if not rare_app and not rare_relation:
+        _record(cache, "not_rare_by_fleet_reference")
         return None
+    _record(cache, "rare_application_candidates" if rare_app
+            else "rare_launch_relationship_candidates")
     category = "rare_application" if rare_app else "rare_launch_relationship"
     reasons = (
         ["New locally and previously seen on very few covered fleet hosts."]

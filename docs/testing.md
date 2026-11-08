@@ -1,4 +1,27 @@
-# Verification report - 0.1.0a21
+# Verification report - 0.1.0a22
+
+## Observable environment-relative detection funnel (0.1.0a22)
+
+The operational metrics endpoint now reports `evaluation_pipeline_last_7d`,
+aggregated by **processing UTC day** rather than event time. Counters
+distinguish accepted process creates, historical backfill, older-than-24h
+events, live events, locally familiar behavior, insufficient local history,
+missing usable app identity, insufficient fleet coverage, evaluated fleet
+reference and unusual application/launch candidates. The output contains
+counts only, no namespaces, hosts, processes or raw log fields. The
+stored State JSON is bounded to seven processing UTC days and committed
+in the same ingest transaction as the source observations. Replays that
+were de-duplicated do not advance counters. Counts begin with the new
+release; they are not a historical recomputation.
+
+There is no change to detector thresholds, findings, policy defaults or
+approval rules. This instrumentation answers why a freshly deployed
+behavioral detector has zero findings without assuming zero anomalous
+behavior or silently making it more sensitive. The counters are **events**,
+not unique endpoints or distinct behavioral relationships. Live event
+processing still requires event timestamps within 24 hours of ingestion.
+Tests verify eligibility stages, historical vs live counts, count-only
+metrics, and deduplicated replay behavior.
 
 ## Environment-relative behavioral discovery (0.1.0a21)
 
@@ -113,7 +136,7 @@ against the production PostgreSQL instance.
 
 ## Automated verification
 
-The 0.1.0a21 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a22 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.

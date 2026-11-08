@@ -159,3 +159,24 @@ def test_environment_discovery_metrics_authenticated_and_counts_only(browser, en
     assert report["minimum_fleet_hosts"] == 50
     assert report["includes_endpoints_or_executable_names"] is False
     assert "workstation.example" not in response.text
+
+
+
+def test_behavioral_pipeline_aggregates_only_recent_daily_counts(browser, engine):
+    from deepsnout.db import set_state
+    from deepsnout.db import now as utc_now
+    day = int(utc_now()) // 86400
+    with transaction(engine) as db:
+        set_state(db, "behavioral_discovery_pipeline", {
+            "schema": 1, "last_updated": utc_now(),
+            "by_day": {
+                str(day): {"event1_recent": 23, "fleet_reference_eligible": 7},
+                str(day-1): {"event1_recent": 10},
+                str(day-9): {"event1_recent": 400},
+            },
+        })
+    payload = browser.get("/api/behavioral-discovery/metrics").json()
+    assert payload["evaluation_pipeline_last_7d"]["event1_recent"] == 33
+    assert payload["evaluation_pipeline_last_7d"]["fleet_reference_eligible"] == 7
+    assert payload["evaluation_counts_are_events_not_distinct_hosts"]
+    assert "400" not in str(payload["evaluation_pipeline_last_7d"])
