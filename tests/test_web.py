@@ -147,3 +147,15 @@ def test_admin_role_and_password_reset(browser,engine):
     with transaction(engine) as db:
         u=db.get(User,uid)
         assert u.role=='analyst' and check_password(u.password,'Replacement test passphrase')
+
+
+def test_environment_discovery_metrics_authenticated_and_counts_only(browser, engine):
+    response = browser.get("/api/behavioral-discovery/metrics")
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["detector"] == "DS-BEH-001"
+    assert report["behavioral_enabled"] is True
+    assert report["findings_total"] == 0
+    assert report["minimum_fleet_hosts"] == 50
+    assert report["includes_endpoints_or_executable_names"] is False
+    assert "workstation.example" not in response.text

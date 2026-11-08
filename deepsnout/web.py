@@ -699,6 +699,33 @@ def create_app(config=None):
             return {"version":__version__,"endpoints":db.scalar(select(func.count()).select_from(Host)),
                     "open_findings":db.scalar(select(func.count()).select_from(Finding).where(Finding.active_key.is_not(None)))}
 
+    @app.get("/api/behavioral-discovery/metrics")
+    def behavioral_discovery_metrics(request: Request):
+        """Counts-only operational feedback for environment-relative findings."""
+        with transaction(engine) as db:
+            login_user(request, db)
+            query = (select(Finding.state, func.count())
+                     .where(Finding.detector == "DS-BEH-001")
+                     .group_by(Finding.state))
+            by_state = {state: count for state, count in db.execute(query)}
+            seven_days = (db.scalar(select(func.count()).select_from(Finding).where(
+                Finding.detector == "DS-BEH-001",
+                Finding.created >= now() - 7 * 86400)) or 0)
+            cfg = policy(db)
+            return {
+                "detector": "DS-BEH-001",
+                "behavioral_enabled": cfg.behavioral_enabled,
+                "findings_total": sum(by_state.values()),
+                "findings_last_7d": seven_days,
+                "by_state": by_state,
+                "reference_days": cfg.baseline_days,
+                "minimum_local_observed_days": cfg.minimum_days,
+                "minimum_fleet_hosts": cfg.behavioral_min_fleet_hosts,
+                "rare_application_fraction": cfg.behavioral_rare_app_fraction,
+                "rare_launch_relation_fraction": cfg.behavioral_rare_relation_fraction,
+                "includes_endpoints_or_executable_names": False,
+            }
+
     @app.get("/findings/{finding_id}/export")
     def export_finding(request: Request,finding_id: str):
         with transaction(engine) as db:
