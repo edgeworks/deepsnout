@@ -176,6 +176,21 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## Environment-relative anomaly discovery
+
+In v0.1.0a21, DS-BEH-001 discovers rare application execution and uncommon
+parent/application/location patterns compared with this environment's
+prior-day Sysmon observations. It does not require network activity, a
+known suspicious executable or an ATT&CK technique. Findings explain local
+novelty, fleet frequency and optional (nonsuppressive) learned peer context.
+The GUI Settings page exposes thresholds, and the authenticated
+`/api/behavioral-discovery/metrics` endpoint reports counts only.
+
+Unlike prior shadow work, this detector produces review-priority findings
+by default. Normal software rollouts and data gaps can trigger it; operators
+should measure the first week's finding volume and review a sample locally.
+It is not a compromise classifier and makes no external data requests.
+
 ## Shadow peer-reference evaluation
 
 Version 0.1.0a20 extends the read-only `deepsnout validate-cohorts`

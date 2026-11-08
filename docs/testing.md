@@ -1,4 +1,40 @@
-# Verification report - 0.1.0a20
+# Verification report - 0.1.0a21
+
+## Environment-relative behavioral discovery (0.1.0a21)
+
+Added DS-BEH-001: a genuine detector for locally novel process execution
+uncommon across the observed endpoint fleet. It needs no network connection,
+ATT&CK mapping, attack signature or hand-built suspicious-executable list.
+Two separate signals surface: previously rare application identities, and
+parent/application/location triples rarely seen among hosts running a common
+application. All fleet references use only previous UTC days in the same
+source namespace; training windows exclude the triggering event.
+
+The default requires seven prior locally observed process days and >=50
+distinct hosts with prior Sysmon process-creation coverage. Application
+rarity is <=max(2, floor(1% of fleet hosts)); common-app relationship
+rarity is <=max(2, floor(2% of app hosts)) and requires the application
+to have been seen on >=max(15, ceil(3% of fleet hosts)) hosts.
+Fleet support counts use *any* prior process coverage, not complete
+collection, so workstation onboarding and data gaps can affect prevalence.
+All thresholds and detector enablement appear in GUI Settings.
+
+Read-only supporting context can reference one currently screened cohort,
+counting only peers that ran the same application on enough prior days.
+This peer evidence never suppresses or gates the finding and does not
+imply stable/independently verified peers. DS-EXEC-002 is unchanged.
+The new detector creates a review-priority finding, grouping repetitions
+by host/application for rare apps and by host/parent/app/location for
+rare launch patterns. Exact host/detector/context expectations remain
+reviewable; the underlying observations are retained.
+
+An authenticated counts-only endpoint
+`/api/behavioral-discovery/metrics` exposes detector volume and decision
+states without hostnames or application names. Synthetic tests cover
+signature-free findings, no-network discovery, local/fleet learning,
+routine behavior, parent novelty, de-duplication, GUI controls and peer
+comparison. Real-world false-positive volume and detection utility
+remain unmeasured until operator tests.
 
 ## Shadow reference-pool prioritization (0.1.0a20)
 
@@ -77,7 +113,7 @@ against the production PostgreSQL instance.
 
 ## Automated verification
 
-The 0.1.0a20 feature code is exercised by the Python suite against SQLite and
+The 0.1.0a21 feature code is exercised by the Python suite against SQLite and
 PostgreSQL. The final disposable Compose verification is tracked on the
 release-head workflow run; the source manifest is checked in CI so published
 integrity hashes cannot silently drift from tracked files.

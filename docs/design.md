@@ -65,6 +65,24 @@ segment is masked; it is not comprehensive PII redaction. Restrict access/backup
 Normalized queued imports retain compact records until success, then payloads are
 cleared. Failed payloads expire with their job after seven days.
 
+## Environment-relative novelty beyond signatures (v0.1.0a21)
+
+The independent DS-BEH-001 event-time discovery path flags a locally new
+execution context when either the application is rarely seen across covered
+endpoints or a common application has an unusual parent and image-location
+pairing. No known threat mapping, remote address, known suspicious name or
+network activity is a prerequisite. Prior-day context and distinct-host
+coverage remain separate: rare is not synonymous with malicious.
+
+A current machine-screened behavioral cohort can supply a single optional
+application-qualified peer comparison as evidence, but neither cohort
+membership nor its prevalence can suppress these new findings. The
+authenticated counts-only metrics endpoint permits local measurement of
+candidate volume without uploading organization-specific source data.
+Incomplete Sysmon coverage and concurrent software rollout remain explicit
+sources of uncertainty. This path observes execution characteristics only;
+it is not a comprehensive unsupervised detection engine.
+
 ## Reference and decision semantics
 
 Previous calendar days only, current day excluded. Default 28-day reference,

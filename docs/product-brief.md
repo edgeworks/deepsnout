@@ -35,6 +35,20 @@ coverage, discovery below the threshold, transparent comparisons and affordable
 operation. A prettier screen or fewer cards alone is not success. Validate on
 later held-out telemetry and a limited pilot before scaling up.
 
+## Owner direction: environment understanding, not known-pattern copying
+
+The owner emphasizes discovering what is unusual in DeepSnout's actual
+environment, including behavior not documented by MITRE ATT&CK or a known
+adversary technique. ATT&CK is useful for subsequent analyst interpretation,
+not a discovery prerequisite. Explain routine versus unusual observed
+execution and activity before trying to infer attacker intent. Preserve
+novelty and rarity as observations, not maliciousness probabilities.
+
+The first event-time implementation of this direction is DS-BEH-001:
+environment-relative application and launch-pattern novelty with an
+optional learned cohort comparison. Broader unsupervised, multivariate
+discovery and detector-specific historical peer quality remain next steps.
+
 ## Next iterations
 
 Better application identity; richer pairwise novelty; process role/port change;
