@@ -176,6 +176,7 @@ def test_behavioral_pipeline_aggregates_only_recent_daily_counts(browser, engine
             },
         })
     payload = browser.get("/api/behavioral-discovery/metrics").json()
+    assert payload["findings_last_7d"] == 0
     assert payload["evaluation_pipeline_last_7d"]["event1_recent"] == 33
     assert payload["evaluation_pipeline_last_7d"]["fleet_reference_eligible"] == 7
     assert payload["evaluation_counts_are_events_not_distinct_hosts"]

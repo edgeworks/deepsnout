@@ -715,7 +715,7 @@ def create_app(config=None):
             state = db.get(State, "behavioral_discovery_pipeline")
             pipeline = state.value if state else {}
             today = int(now()) // 86400
-            seven_days = {}
+            pipeline_last_7d = {}
             for bucket_day, counters in pipeline.get("by_day", {}).items():
                 if (not isinstance(counters, dict)
                         or not str(bucket_day).lstrip("-").isdigit()
@@ -723,11 +723,11 @@ def create_app(config=None):
                     continue
                 for label, count in counters.items():
                     if isinstance(count, int) and not isinstance(count, bool):
-                        seven_days[label] = seven_days.get(label, 0) + count
+                        pipeline_last_7d[label] = pipeline_last_7d.get(label, 0) + count
             return {
                 "detector": "DS-BEH-001",
                 "behavioral_enabled": cfg.behavioral_enabled,
-                "evaluation_pipeline_last_7d": seven_days,
+                "evaluation_pipeline_last_7d": pipeline_last_7d,
                 "evaluation_last_updated": pipeline.get("last_updated"),
                 "evaluation_window": "last seven processing UTC days, including today",
                 "evaluation_counts_are_events_not_distinct_hosts": True,
