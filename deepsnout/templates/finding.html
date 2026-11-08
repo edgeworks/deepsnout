@@ -4,7 +4,30 @@
 <p><strong>{{ e.app }}</strong> exceeded its own prior reference in two consecutive {{ e.window_minutes }}-minute windows. Destination counts are approximate, not a count of malicious sites.</p><div class="comparison"><div><small>Prior median</small><strong>{{ e.baseline_median }}</strong></div><div><small>Prior 95th percentile</small><strong>{{ e.baseline_p95 }}</strong></div><div><small>Previous window</small><strong>{{ e.previous }}</strong></div><div class="accent"><small>Current window</small><strong>{{ e.current }}</strong></div></div>
 <dl><dt>Reference coverage</dt><dd>{{ e.baseline_windows }} active windows over {{ e.baseline_days_observed }} observed days</dd><dt>Reference cutoff</dt><dd>{{ e.reference_before|utc }} (current day excluded)</dd><dt>Comparison measure</dt><dd>{{ 'Registrable-domain groups' if e.metric=='domain' else 'External destination IP diversity' }}</dd><dt>Review threshold</dt><dd>More than {{ e.threshold }} groups in each of two adjacent windows</dd></dl><h3>Bounded examples</h3><p class="muted">Illustrative destinations, not a threat list.</p><div class="chips">{% for sample in e.samples %}<code>{{ sample }}</code>{% endfor %}</div>
 {% else %}<div class="evidence-chain"><div><small>OBSERVED PARENT FIELDS</small><h3>{{ e.process.parent }}</h3><code>{{ e.process.parent_guid or 'Parent GUID unavailable' }}</code></div><span class="arrow">&darr;</span><div><small>PROCESS CREATION &middot; {{ e.process.event_time|utc }}</small><h3>{{ e.process.app }}</h3><code>{{ e.process.image }}</code></div>{% if e.network %}<span class="arrow">&darr;</span><div><small>EXACT SAME ENDPOINT + PROCESS GUID</small><h3>Outbound connection</h3><code>{{ e.network.destination }}:{{ e.network.port }}</code><p>{{ e.network.event_time|utc }}</p></div>{% endif %}</div>
-<h3>Extracted characteristics</h3><div class="chips">{% for key,value in e.flags.items() if value %}<span class="badge">{{ key|replace('_',' ') }}</span>{% endfor %}</div><p class="muted">Characteristics are evidence, not proof. Full command lines are not stored; use the source log reference to inspect them.</p><dl><dt>Local reference</dt><dd>{{ e.reference.prior_observed_days }} prior observed days &middot; {{ e.reference.confidence }}</dd><dt>This launch context</dt><dd>{{ e.reference.prior_context_days }} prior observed days</dd><dt>Application peers</dt><dd>{{ e.reference.peer_seen }} / {{ e.reference.peer_eligible }} in cohort {{ e.reference.cohort }}{% if not e.reference.peer_qualified %} &mdash; too few eligible peers for a confident comparison{% endif %}</dd></dl>{% endif %}</section>
+<h3>Extracted characteristics</h3><div class="chips">{% for key,value in e.flags.items() if value %}<span class="badge">{{ key|replace('_',' ') }}</span>{% endfor %}</div><p class="muted">Characteristics are evidence, not proof. Full command lines are not stored; use the source log reference to inspect them.</p><dl><dt>Local reference</dt><dd>{{ e.reference.prior_observed_days }} prior observed days &middot; {{ e.reference.confidence }}</dd><dt>This launch context</dt><dd>{{ e.reference.prior_context_days }} prior observed days</dd><dt>Application peers</dt><dd>{{ e.reference.peer_seen }} / {{ e.reference.peer_eligible }} in cohort {{ e.reference.cohort }}{% if not e.reference.peer_qualified %} &mdash; too few eligible peers for a confident comparison{% endif %}</dd></dl>
+{% if e.environment is defined %}
+<h3>Why this is unusual in the observed environment</h3>
+<p>{{ e.environment.reasons|join(' ') }}</p>
+<dl>
+<dt>Discovery category</dt><dd>{{ e.environment.category|replace('_', ' ') }}</dd>
+<dt>Local history of this application</dt><dd>{{ e.environment.prior_local_app_days }} prior days</dd>
+<dt>Hosts with process-creation coverage</dt><dd>{{ e.environment.reference.fleet_hosts_with_process_coverage }}</dd>
+<dt>Hosts previously running this application</dt><dd>{{ e.environment.reference.fleet_application_hosts }} (rare threshold {{ e.environment.reference.rare_application_max_hosts }})</dd>
+{% if e.environment.reference.fleet_launch_relationship_hosts is not none %}
+<dt>Hosts with the same parent, application and image location</dt>
+<dd>{{ e.environment.reference.fleet_launch_relationship_hosts }} (rare threshold {{ e.environment.reference.rare_relation_max_hosts }})</dd>
+{% endif %}
+<dt>Reference cutoff</dt><dd>{{ e.environment.reference.reference_before|utc }} (current UTC day excluded)</dd>
+</dl>
+<h3>Behavioral peer comparison (context only)</h3>
+{% if e.environment.cohort_reference.available %}
+<p>{{ e.environment.cohort_reference.peers_with_same_parent_and_location }} of
+{{ e.environment.cohort_reference.application_qualified_peers }} application-qualified
+members of one currently discovered comparison cohort used this same relationship.</p>
+<p class="muted">{{ e.environment.cohort_reference.limitations }}</p>
+{% else %}<p class="muted">No application-qualified members of a currently supported cohort are available for comparison. Fleet rarity is independent of this limitation.</p>{% endif %}
+<p class="muted">{{ e.environment.uncertainty }}</p>
+{% endif %}{% endif %}</section>
 <section class="panel"><h2>What this does not tell us</h2><p>{{ e.interpretation }}</p>{% for line in e.limitations %}<p class="muted">{{ line }}</p>{% endfor %}<p class="muted">No reputation service was queried. Common software can be misused; uncommon behavior can be legitimate.</p></section><details class="panel"><summary>Evidence snapshot and source references</summary><pre>{{ f.evidence|pretty }}</pre></details>
 <section class="panel"><h2>Investigation history</h2>{% for entry in history %}<div class="audit-line"><strong>{{ entry.actor }} &middot; {{ entry.action }}</strong><small>{{ entry.created|utc }}</small><p>{{ entry.detail }}</p></div>{% else %}<p class="muted">No analyst decisions yet.</p>{% endfor %}</section></div>
 <aside><section class="panel"><h3>Endpoint</h3><a href="/endpoints/{{ host.id }}">{{ host.name }}</a><p class="muted">{{ host.cohort }} &middot; {{ host.namespace }}</p><dl><dt>First observed</dt><dd>{{ f.first_seen|utc }}</dd><dt>Most recent</dt><dd>{{ f.last_seen|utc }}</dd><dt>Supporting observations</dt><dd>{{ f.occurrences }} (do not add to priority)</dd></dl></section>

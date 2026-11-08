@@ -20,6 +20,11 @@ class Policy(BaseModel):
     execution_enabled: bool = True
     contextual_enabled: bool = True
     network_enabled: bool = True
+    behavioral_enabled: bool = True
+    behavioral_min_fleet_hosts: int = Field(50, ge=20, le=10000)
+    behavioral_min_common_app_hosts: int = Field(15, ge=5, le=1000)
+    behavioral_rare_app_fraction: float = Field(0.01, ge=0.001, le=0.1)
+    behavioral_rare_relation_fraction: float = Field(0.02, ge=0.001, le=0.2)
 
     @model_validator(mode="after")
     def check_window(self):

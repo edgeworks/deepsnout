@@ -12,16 +12,17 @@ from .db import (Host, Coverage, Seen, BatchReceipt, Process, BehaviorDay, Windo
 from .normalize import digest, VERSION
 from .features import Diversity, service_group
 from .peer_groups import peer_group_suppression_allowed
+from .environment_novelty import environment_novelty
 
 DAY = 86400
 WINDOW = 1800
-ENGINE_VERSION = "behavior-v1"
+ENGINE_VERSION = "behavior-v2"
 SCRIPT_APPS = {"powershell.exe", "pwsh.exe", "mshta.exe", "regsvr32.exe", "cmd.exe",
                "cscript.exe", "wscript.exe", "rundll32.exe"}
 USER_LOCATIONS = {"temporary", "downloads", "user-profile", "network-share"}
 UNUSUAL_PARENTS = {"winword.exe", "excel.exe", "outlook.exe", "powerpnt.exe",
                    "chrome.exe", "msedge.exe", "firefox.exe"}
-EXPECTABLE = {"DS-EXEC-002", "DS-NET-001"}
+EXPECTABLE = {"DS-EXEC-002", "DS-NET-001", "DS-BEH-001"}
 
 
 class CapacityError(RuntimeError):
@@ -95,7 +96,7 @@ def make_finding(db, host, detector, context, ts, title, summary, evidence, prio
     return finding
 
 
-def execution_findings(db, host, process, cfg, clock):
+def execution_findings(db, host, process, cfg, clock, *, environment_cache=None):
     if process.created is None or process.created < clock - DAY:
         return
     meta = process.metadata_json
@@ -113,6 +114,34 @@ def execution_findings(db, host, process, cfg, clock):
             "A scripting-capable process combines a remote reference with an execution primitive. "
             "Review the original command and launch context; automation can also produce this pattern.",
             sample, "high")
+    # A distinct environment-relative discovery lens: no known TTP, fixed
+    # suspicious-executable list or outbound network event is required.
+    # Evaluate once for event 1, not on every later ProcessGuid network join.
+    if environment_cache is not None and cfg.behavioral_enabled:
+        novelty = environment_novelty(
+            db, host, process.app, meta.get("parent", "unknown"),
+            process.location, ref, process.created, cfg, environment_cache)
+        if novelty:
+            evidence = {**sample, "environment": novelty}
+            title = (
+                "Uncommon application for this environment"
+                if novelty["category"] == "rare_application"
+                else "Uncommon application launch relationship"
+            )
+            detail = (
+                "is rarely observed on other covered endpoints."
+                if novelty["category"] == "rare_application"
+                else "has an uncommon parent and image-location pairing "
+                     "among endpoints that run this application."
+            )
+            make_finding(
+                db, host, "DS-BEH-001", digest(*novelty["identity"]),
+                process.created, title,
+                f"{process.app} has a locally new execution context and {detail} "
+                "This is unexpected behavior, not a malicious verdict.",
+                evidence,
+            )
+
     network = process.network
     if (cfg.contextual_enabled and ref.get("confidence") == "established" and ref.get("local_new")
             and network.get("external") and network.get("initiated") is True
@@ -157,6 +186,7 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                             "The batch/checkpoint was not committed.")
     hosts, processes, coverage, behaviors, windows, sketches = {}, {}, {}, {}, {}, {}
     refs, context_counts = {}, {}
+    environment_cache = {}
     historical_ref_keys = set()
     ids = [digest(namespace, e.id) for e in events]
     known = set()
@@ -276,11 +306,13 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                 if proc:
                     proc.created, proc.app, proc.location, proc.context = e.ts, e.app, e.location, ctx
                     proc.metadata_json = sample
-                    execution_findings(db, host, proc, cfg, clock)
+                    execution_findings(db, host, proc, cfg, clock,
+                                       environment_cache=environment_cache)
                 else:
                     proxy = Process(guid="", created=e.ts, app=e.app, location=e.location,
                                     context=ctx, metadata_json=sample, network={})
-                    execution_findings(db, host, proxy, cfg, clock)
+                    execution_findings(db, host, proxy, cfg, clock,
+                                       environment_cache=environment_cache)
             bkey = digest(hid, day, ctx)
             if bkey not in behaviors:
                 behaviors[bkey] = None if historical else db.get(BehaviorDay, bkey, populate_existing=True)

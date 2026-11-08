@@ -620,7 +620,8 @@ def create_app(config=None):
     async def settings_update(request: Request):
         form=await form_data(request)
         values={k:form[k] for k in Policy.model_fields if k in form}
-        for k in ("execution_enabled","contextual_enabled","network_enabled"): values[k]=form.get(k)=="on"
+        for k in ("execution_enabled","contextual_enabled","network_enabled","behavioral_enabled"):
+            values[k]=form.get(k)=="on"
         new=Policy.model_validate(values)
         with transaction(engine) as db:
             user=login_user(request,db,{"admin"}); set_state(db,"policy",new.model_dump())
