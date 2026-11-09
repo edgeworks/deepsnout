@@ -45,6 +45,26 @@ and fixed command flags. Hash/version churn alone does not change it. This modes
 v1 identity can conflate same-named binaries in the same class, and a path class is
 not a verified writable ACL. Hashes and original source references remain evidence.
 
+## Mixed-age ingestion and atomic checkpoints (v0.1.0a25)
+
+A Splunk index-time slice may mix Sysmon event timestamps older and
+newer than the live 24-hour finding horizon. The single-worker
+ingestion coordinator partitions those normalized observations at
+a single captured ingest timestamp, using the historical preloading
+and state/reference elision for older observations and normal live
+analysis for recent observations. Two engine.ingest calls operate
+within the *same transaction* and in chronological portion order.
+A single full-slice batch receipt, combined pipeline counters and
+the Splunk checkpoint are committed only after both portions and
+normal window evaluation succeed. Failure leaves the previous
+checkpoint and no partial observations. Uniform-age slices preserve
+the original single-call batch receipt path.
+
+Worker stage progress and completed-work counters remain numeric,
+with no new telemetry sent outside the deployment. No new schema or
+index is required. The performance benefit depends on the ratio of
+older to genuinely live events, which is exposed in each job report.
+
 ## Self-diagnosis of detection redundancy (v0.1.0a24)
 
 A separate worker job scans the most recent seven days of retained

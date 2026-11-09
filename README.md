@@ -176,6 +176,25 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## Faster mixed-age polling (v0.1.0a25)
+
+DeepSnout's Splunk source may deliver events within one index-time
+slice whose actual event timestamps span more than 24 hours. Previously,
+one recent event forced the full slice through expensive live
+reference queries and process tracking. The worker now uses the
+historical fast path for older observations and live evaluation only
+for recent ones. Both portions run within **one transaction** with
+one batch receipt and source checkpoint. On error or cancellation,
+neither portion or the checkpoint is committed.
+
+The Operations job report separates historical and live event counts
+and ingestion seconds. While the PostgreSQL worker ingests, its
+existing heartbeat exposes processing stages and numeric counts.
+This does not change any detection thresholds and requires no
+database migration. Rebuilding the worker image is necessary; the
+speedup has been tested functionally with synthetic data but depends
+on the age composition of actual source batches.
+
 ## DeepSnout finding-quality self-diagnosis (v0.1.0a24)
 
 The **Finding quality** page is an independent, read-only view of

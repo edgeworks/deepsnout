@@ -159,3 +159,13 @@ def test_common_peer_context_discount(db):
     ingest(db,[evt(host='subject',n=900,ts=CLOCK-300,Image=r'C:\Temp\utility.exe'),
         evt(3,host='subject',n=900,ts=CLOCK-200,Image=r'C:\Temp\utility.exe')],clock=CLOCK)
     assert count(db,Finding)==0
+
+
+def test_ingest_progress_is_numeric_and_covers_entire_history(db):
+    stamps = []
+    items = [evt(ts=CLOCK - 3 * DAY + i, n=2000 + i) for i in range(251)]
+    report = ingest(db, items, clock=CLOCK, historical=True,
+                    on_progress=lambda done, total: stamps.append((done, total)))
+    assert report["accepted"] == 251
+    assert stamps == [(0, 251), (250, 251), (251, 251)]
+    assert count(db, Process) == 0

@@ -1,4 +1,42 @@
-# Verification report - 0.1.0a24
+# Verification report - 0.1.0a25
+
+## Mixed-age Splunk ingestion fast path and progress (0.1.0a25)
+
+In the previous implementation, one Sysmon event younger than 24 hours
+made an entire Splunk index-time slice use live ingestion, including
+tens of thousands of old observations. A real sanitized comparison
+reported 31,204 accepted historical events processed in 22.263 seconds
+versus 32,028 mixed-age accepted events in 7,716.546 seconds.
+This establishes a code-path discrepancy, not a proven performance
+number for this new release.
+
+The worker now partitions each normalized slice by the event-time live
+finding horizon (24 hours before one captured ingestion clock). It
+processes the older events through the existing historical fast path
+and only processes recent events with live process and behavioral
+reference evaluation. Old and recent portions are still ordered by
+timestamp, use one transaction, and share one source checkpoint and
+batch receipt. A failure or cancellation in either portion rolls back
+both portions, the receipt, the counters and the source checkpoint.
+The reported `last_ingest` is the combined slice rather than just its
+recent portion. Historical events remain available for prior-day
+references, but cannot create live findings. Only genuinely recent
+events get normal live detection; no detector rule was relaxed.
+
+The job report now exposes `age_partition`,
+`historical_input_events`, `live_input_events`,
+`historical_ingest_seconds` and `live_ingest_seconds`. The ingestion
+loop reports bounded, numeric progress to the existing PostgreSQL
+worker heartbeat every 250 inspected observations and at stage
+boundaries. Its callback also observes job cancellation; SQLite
+continues using the existing worker-health mechanism.
+
+Regression tests exercise mixed timestamps received in arbitrary
+order, retention of old summaries for live references, full-slice
+batch replay without double-counting, rollback on a synthetic live
+failure, source checkpoint atomicity, retained historical-only
+behavior and callback progress. These are synthetic tests only:
+production performance must be measured from subsequent job reports.
 
 ## Automatic self-diagnosis of finding repetition (0.1.0a24)
 
