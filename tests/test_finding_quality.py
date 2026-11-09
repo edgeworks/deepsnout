@@ -62,7 +62,8 @@ def test_identical_names_can_be_repetitive_without_a_numeric_version():
     assert family["variant_count"] == 1
     assert not family["version_churn"]
     assert family["host_count"] == 12
-    assert snapshot["self_diagnosis"] == "one-family-dominance"
+    # Less than 20 findings is insufficient volume for a dominance verdict.
+    assert snapshot["self_diagnosis"] == "no-dominant-family"
 
 
 def test_parent_location_detector_category_and_namespace_are_boundaries():

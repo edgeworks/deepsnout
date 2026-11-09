@@ -373,6 +373,14 @@ def _seed_finding_quality_example(db):
         first_seen=stamp-100, last_seen=stamp-100,
         created=stamp-30, evidence={"app": "updater.exe"},
     ))
+    # A second independent finding reaches the 20-finding concentration floor.
+    db.add(Finding(
+        host_id=hosts[1].id, detector="DS-NET-001", context="net-second",
+        title="Another unrelated synthetic finding", summary="Synthetic",
+        priority="review", state="new",
+        first_seen=stamp-105, last_seen=stamp-105,
+        created=stamp-30, evidence={"app": "other-network.exe"},
+    ))
     # Synthetic demo observations are excluded from operational reporting.
     demo = Host(id="quality-demo", name="demo.example", namespace="demo",
                 cohort="unassigned", first_seen=stamp-3600, last_seen=stamp)
@@ -407,7 +415,7 @@ def test_finding_quality_gui_scheduler_metrics_and_drilldown(browser, engine, co
     report = browser.get("/api/finding-quality/metrics")
     assert report.status_code == 200
     metrics = report.json()
-    assert metrics["source_findings"] == 19
+    assert metrics["source_findings"] == 20
     assert metrics["dominant_family_findings"] == 18
     assert metrics["families_discovered"] == 1
     assert metrics["version_churn_families"] == 1
