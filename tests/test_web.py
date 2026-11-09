@@ -253,7 +253,8 @@ def test_findings_table_filters_global_sort_and_details_link(browser, engine):
     sorted_page = browser.get("/findings/table", params={
         "status": "all", "sort": "parent", "order": "desc"})
     assert sorted_page.status_code == 200
-    assert sorted_page.text.index("winword.exe") < sorted_page.text.index("explorer.exe")
+    assert (sorted_page.text.index('<td class="table-executable">winword.exe</td>')
+            < sorted_page.text.index('<td class="table-executable">explorer.exe</td>'))
     assert "Findings table" in browser.get("/").text
 
 

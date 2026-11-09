@@ -322,7 +322,7 @@ def create_app(config=None):
 
         sort_links = {}
         for column in TABLE_SORTS:
-            direction = ("asc" if column == "when" else "desc")
+            direction = ("desc" if column == "when" else "asc")
             if filters["sort"] == column:
                 direction = "asc" if filters["order"] == "desc" else "desc"
             sort_links[column] = link(sort=column, order=direction, page=1)
