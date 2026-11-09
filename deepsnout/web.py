@@ -25,6 +25,7 @@ from .splunk import SplunkSettings, validate_url
 from .worker import enqueue
 from .engine import EXPECTABLE
 from .finding_table import finding_csv, finding_table_row
+from .finding_quality import finding_quality_state, metrics_from_snapshot
 from .features import psl_available
 from .analytical_cohorts import analytical_cohort_state, anonymized_cohort_metrics
 from .peer_groups import (suggestion_state, peer_group_catalog, approve_suggestion,
@@ -482,6 +483,66 @@ def create_app(config=None):
             assign_host_group(db,host,value)
             audit(db,user.username,"endpoint.peer_group",host_id,value)
         return RedirectResponse("/endpoints/"+host_id,303)
+
+    @app.get("/finding-quality")
+    def finding_quality_page(request: Request):
+        with transaction(engine) as db:
+            user = login_user(request, db)
+            snapshot = finding_quality_state(db)
+            attempt = db.get(State, "finding_quality_last_attempt")
+            jobs = list(db.scalars(
+                select(Job).where(Job.kind == "finding_quality")
+                .order_by(Job.created.desc()).limit(4)))
+            return view(request, "finding_quality.html", user=user,
+                        report=snapshot, attempt=attempt.value if attempt else None,
+                        quality_jobs=jobs)
+
+    @app.post("/finding-quality/refresh")
+    async def finding_quality_refresh(request: Request):
+        await form_data(request)
+        with transaction(engine) as db:
+            user = login_user(request, db, {"admin", "analyst"})
+            job = enqueue(db, "finding_quality", {
+                "origin": "operator", "requested_by": user.username})
+            audit(db, user.username, "finding_quality.refresh", job.id)
+        return RedirectResponse("/jobs/" + job.id, 303)
+
+    @app.get("/finding-quality/families/{family_id}")
+    def finding_quality_family_page(request: Request, family_id: str,
+                                    page: int = 1):
+        page = min(100000, max(1, page))
+        page_size = 75
+        with transaction(engine) as db:
+            user = login_user(request, db)
+            report = finding_quality_state(db)
+            if not report:
+                raise HTTPException(404, "Finding-quality snapshot not yet available")
+            family = next(
+                (g for g in report.get("families", [])
+                 if g.get("id") == family_id), None)
+            if family is None:
+                raise HTTPException(404, "Finding family is not in the current snapshot")
+            ids = family["member_ids"]
+            current = ids[(page-1)*page_size:page*page_size]
+            matches = db.execute(
+                select(Finding, Host).join(Host, Finding.host_id == Host.id)
+                .where(Finding.id.in_(current))).all() if current else []
+            rows_by_id = {f.id: (f, h) for f, h in matches}
+            rows = [{"finding": rows_by_id[fid][0],
+                     "row": finding_table_row(*rows_by_id[fid])}
+                    for fid in current if fid in rows_by_id]
+            return view(
+                request, "finding_quality_family.html", user=user,
+                report=report, family=family, rows=rows,
+                page=page, page_size=page_size,
+                has_previous=page > 1,
+                has_next=page*page_size < len(ids))
+
+    @app.get("/api/finding-quality/metrics")
+    def finding_quality_metrics(request: Request):
+        with transaction(engine) as db:
+            login_user(request, db)
+            return JSONResponse(metrics_from_snapshot(finding_quality_state(db)))
 
     @app.get("/peer-groups")
     def peer_groups_page(request: Request):

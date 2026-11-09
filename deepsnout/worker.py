@@ -9,6 +9,7 @@ from .db import (transaction, Source, Job, State, Host, Coverage, Process, Behav
 from .normalize import Event, digest
 from .engine import ingest, evaluate_windows, maintenance
 from .peer_groups import refresh_peer_groups
+from .finding_quality import refresh_finding_quality, ATTEMPT_KEY as QUALITY_ATTEMPT_KEY, STATE_KEY as QUALITY_STATE_KEY
 from .splunk import SplunkClient, SplunkSettings, SplunkError
 from .security import crypto
 from .demo import fixtures
@@ -91,7 +92,7 @@ def enqueue(db, kind, payload=None, source_id=None):
         existing = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(ACTIVE_JOB_STATUSES)))
         if existing:
             return existing
-    if kind == "peer_groups":
+    if kind in {"peer_groups", "finding_quality"}:
         existing = db.scalar(select(Job).where(Job.kind == kind, Job.status.in_(ACTIVE_JOB_STATUSES)))
         if existing:
             return existing
@@ -100,6 +101,8 @@ def enqueue(db, kind, payload=None, source_id=None):
     db.flush()
     if kind == "peer_groups":
         set_state(db, "peer_group_last_attempt", {"at": now(), "job_id": job.id})
+    if kind == "finding_quality":
+        set_state(db, QUALITY_ATTEMPT_KEY, {"at": now(), "job_id": job.id})
     return job
 
 
@@ -266,7 +269,7 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             records = fixtures(now())
             payload["namespace"] = "demo"
             payload["batch_id"] = digest("demo", int(now()) // 86400)
-        elif kind not in {"maintenance", "remove_demo", "peer_groups"}:
+        elif kind not in {"maintenance", "remove_demo", "peer_groups", "finding_quality"}:
             raise ValueError("Unknown job kind")
         guard()
         if _cancel_requested(engine, job_id):
@@ -299,6 +302,9 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     result["evaluate_seconds"] = round(time.monotonic() - evaluate_started, 3)
             if kind == "peer_groups":
                 result = refresh_peer_groups(db, progress=progress)
+            if kind == "finding_quality":
+                progress("finding-quality")
+                result = refresh_finding_quality(db)
             if kind == "remove_demo":
                 ids = select(Host.id).where(Host.namespace == "demo")
                 count = db.scalar(select(func.count()).select_from(Host).where(Host.namespace == "demo"))
@@ -381,6 +387,18 @@ def tick(engine, config, guard=lambda: None):
         if (not catching_up_ids and db.scalar(select(func.count()).select_from(Host))
                 and now() - max(peer_updated, peer_attempted) >= 3600):
             enqueue(db, "peer_groups", {"origin": "scheduler"})
+        quality_snapshot = db.get(State, QUALITY_STATE_KEY)
+        quality_updated = quality_snapshot.value.get("updated_at", 0) if quality_snapshot else 0
+        quality_attempt = db.get(State, QUALITY_ATTEMPT_KEY)
+        quality_attempted = quality_attempt.value.get("at", 0) if quality_attempt else 0
+        # Delay the hourly diagnostic while source backlog is being processed.
+        # Operator-triggered quality refreshes can still be queued explicitly.
+        if (not catching_up_ids
+                and now() - max(quality_updated, quality_attempted) >= 3600
+                and db.scalar(select(func.count()).select_from(Finding))
+                and (db.scalar(select(func.count()).select_from(Job)
+                     .where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0) < 20):
+            enqueue(db, "finding_quality", {"origin": "scheduler"})
         queued = db.scalars(select(Job).where(Job.status == "queued").order_by(Job.created).limit(50)).all()
         operator_job = next((item for item in queued
                              if isinstance(item.payload, dict) and item.payload.get("origin") == "operator"), None)
@@ -415,6 +433,9 @@ def run(engine, config):
                 if job.kind == "peer_groups":
                     set_state(db, "peer_group_last_attempt", {"at": now(), "job_id": job.id,
                                                               "recovered": True})
+                if job.kind == "finding_quality":
+                    set_state(db, QUALITY_ATTEMPT_KEY, {"at": now(), "job_id": job.id,
+                                                        "recovered": True})
                 if job.source_id:
                     source = db.get(Source, job.source_id)
                     if source:

@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block title %}Finding family &middot; DeepSnout{% endblock %}
+{% block content %}
+<a class="back" href="/finding-quality">&larr; Finding quality</a>
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">RELATED OBSERVATIONS, NOT AUTOMATIC TRUST</p>
+    <h1>{{ family.family_pattern }}</h1>
+    <p>{{ family.interpretation }}</p>
+  </div>
+  <a class="button" href="/findings/table?detector={{ family.detector|urlencode }}&status=all">All {{ family.detector }} findings</a>
+</header>
+<section class="stats">
+  <div><span>Findings</span><strong>{{ family.finding_count }}</strong><small>{{ '%.1f'|format(family.share_of_findings*100) }}% of analyzed stream</small></div>
+  <div><span>Distinct hosts</span><strong>{{ family.host_count }}</strong><small>Within {{ family.namespace }}</small></div>
+  <div><span>Executable-name variants</span><strong>{{ family.variant_count }}</strong><small>{{ 'Numeric-token churn observed' if family.version_churn else 'Exact-name repetition' }}</small></div>
+</section>
+<section class="panel">
+  <h2>Why these findings belong together</h2>
+  <dl>
+    <dt>Parent executable</dt><dd>{{ family.parent }}</dd>
+    <dt>Image location</dt><dd>{{ family.location }}</dd>
+    <dt>Detector / trigger</dt><dd>{{ family.detector }} · {{ family.category|replace('_',' ') }}</dd>
+    <dt>Positive execution flags</dt><dd>{{ family.flags|join(', ') if family.flags else 'None recorded' }}</dd>
+    <dt>Original event-time range</dt><dd>{{ family.first_event|utc }} &ndash; {{ family.last_event|utc }}</dd>
+    <dt>High-priority findings</dt><dd>{{ family.high_priority_findings }}</dd>
+    <dt>Findings marked malicious</dt><dd>{{ family.malicious_findings }}</dd>
+  </dl>
+  <h3>Observed executable variants</h3>
+  <div class="chips">{% for variant in family.variant_examples %}
+    <span><code>{{ variant.name }}</code> × {{ variant.findings }}</span>
+  {% endfor %}</div>
+  {% if family.more_variants %}<p class="muted">{{ family.more_variants }} additional names are not shown in this compact preview.</p>{% endif %}
+  <p class="muted">Patterns generalize only numeric tokens shown to vary in the observed filenames. Structure similarity does not establish the publisher, intent, safety, or legitimacy of the executions.</p>
+</section>
+<section class="panel table-scroll">
+  <h2>Contributing original findings</h2>
+  <p>Click a hostname to review the original finding and its full retained evidence. The original ticket state and priority are unchanged.</p>
+  <table class="findings-table"><thead><tr><th>Last seen</th><th>Hostname</th><th>Parent</th><th>Process</th><th>Trigger</th></tr></thead><tbody>
+  {% for item in rows %}{% set row=item.row %}
+  <tr><td>{{ row.when }}</td>
+      <td><a href="/findings/{{ item.finding.id }}">{{ row.hostname }}</a></td>
+      <td><code>{{ row.parent }}</code></td><td><code>{{ row.process }}</code></td>
+      <td>{{ row.trigger }}</td></tr>
+  {% else %}<tr><td colspan="5">No retained findings for this page. Check retention and refresh analysis.</td></tr>{% endfor %}
+  </tbody></table>
+  <div class="pagination">
+    {% if has_previous %}<a href="/finding-quality/families/{{ family.id }}?page={{ page-1 }}">&larr; Previous</a>{% endif %}
+    {% if has_next %}<a href="/finding-quality/families/{{ family.id }}?page={{ page+1 }}">Next &rarr;</a>{% endif %}
+  </div>
+</section>
+{% endblock %}

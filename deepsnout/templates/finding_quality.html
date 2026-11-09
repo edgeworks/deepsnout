@@ -1,0 +1,74 @@
+{% extends 'base.html' %}
+{% block title %}Finding quality &middot; DeepSnout{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">DEEPSNOUT OBSERVES ITS OWN FINDINGS</p>
+    <h1>Finding quality</h1>
+    <p>Detect recurring behavior families and alert-stream concentration. This analysis is observational only: it does not suppress, resolve, downgrade or approve findings.</p>
+  </div>
+  {% if user.role in ('admin', 'analyst') %}
+  <form method="post" action="/finding-quality/refresh">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="primary">Refresh analysis</button>
+  </form>
+  {% endif %}
+</header>
+
+{% if report %}
+<section class="stats">
+  <div><span>Findings in snapshot</span><strong>{{ report.source_findings }}</strong><small>Last {{ report.window_days }} days · all states · excludes synthetic demo</small></div>
+  <div><span>Largest related family</span><strong>{{ report.dominant_family_findings }}</strong><small>{{ '%.1f'|format(report.dominant_family_share*100) }}% of observed findings</small></div>
+  <div><span>Discovered families</span><strong>{{ report.families_discovered }}</strong><small>{{ report.version_churn_families }} with changing numeric filename tokens</small></div>
+</section>
+<section class="panel">
+  <h2>Self-diagnosis</h2>
+  {% if report.self_diagnosis == 'one-family-dominance' %}
+  <p class="notice"><strong>One behavior family dominates the finding stream.</strong>
+    DeepSnout has identified repeated findings sharing parent, executable-name structure, location, flags and detection context. Review one family before investigating each finding individually.</p>
+  {% else %}
+  <p>No single detected family currently dominates the finding stream at the 35% reference threshold. This does not establish that findings are high-quality or harmless.</p>
+  {% endif %}
+  <p class="muted">Last analysis {{ report.updated_at|utc }} · Source window {{ report.window_start|utc }} to {{ report.window_end|utc }} (finding creation time).
+    {{ report.findings_with_process_evidence }} of {{ report.source_findings }} findings had comparable process evidence;
+    {{ report.findings_not_in_displayed_families }} are outside the displayed families.
+    {% if report.families_omitted %}{{ report.families_omitted }} smaller families omitted from the top-30 display.{% endif %}</p>
+  <p class="muted">Pattern matching is not software identification. A legitimate rollout and a malicious coordinated campaign may have the same concentration profile. All original alerts remain unchanged.</p>
+</section>
+<section class="panel table-scroll">
+  <h2>Related finding families</h2>
+  <table>
+    <thead><tr><th>Learned process pattern</th><th>Parent / location</th><th>Findings</th><th>Hosts</th><th>Name variants</th><th>Share</th><th>Signal</th></tr></thead>
+    <tbody>
+    {% for family in report.families %}
+    <tr>
+      <td><a href="/finding-quality/families/{{ family.id }}"><strong>{{ family.family_pattern }}</strong></a>
+          <small>{{ family.detector }} · {{ family.category|replace('_',' ') }} · {{ family.namespace }}</small></td>
+      <td><code>{{ family.parent }}</code><small>{{ family.location }}</small></td>
+      <td>{{ family.finding_count }}</td>
+      <td>{{ family.host_count }}</td>
+      <td>{{ family.variant_count }}</td>
+      <td>{{ '%.1f'|format(family.share_of_findings*100) }}%</td>
+      <td>{{ family.quality_signals|join(', ') if family.quality_signals else 'repeated context' }}</td>
+    </tr>
+    {% else %}<tr><td colspan="7">No supported multi-host families in this snapshot. Individual unexpected events remain visible in Findings table.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">Clusters require at least five findings and two distinct hosts. Groups never cross namespaces, detectors, behavior categories, parent names, image-location classes, or observed execution flags.</p>
+</section>
+{% else %}
+<section class="panel">
+  <h2>No analysis snapshot yet</h2>
+  <p>DeepSnout schedules this read-only diagnostic approximately hourly after findings exist and source catch-up is complete. You can also run it now using Refresh analysis.</p>
+  {% if attempt %}<p class="muted">Latest attempt: {{ attempt.at|utc }}.</p>{% endif %}
+</section>
+{% endif %}
+{% if quality_jobs %}
+<section class="panel"><h2>Recent analysis jobs</h2>
+  {% for job in quality_jobs %}
+  <p><a href="/jobs/{{ job.id }}">Finding quality · {{ job.created|utc }}</a> &mdash; {{ job.status|replace('_',' ') }}{% if job.error %} · {{ job.error }}{% endif %}</p>
+  {% endfor %}
+</section>
+{% endif %}
+<p class="muted"><a href="/api/finding-quality/metrics">Counts-only diagnostic JSON</a> · Review your organization's sharing policy before exporting any aggregated measurements.</p>
+{% endblock %}
