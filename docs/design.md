@@ -45,6 +45,33 @@ and fixed command flags. Hash/version churn alone does not change it. This modes
 v1 identity can conflate same-named binaries in the same class, and a path class is
 not a verified writable ACL. Hashes and original source references remain evidence.
 
+## Self-diagnosis of detection redundancy (v0.1.0a24)
+
+A separate worker job scans the most recent seven days of retained
+non-demo findings; it clusters related process executions through a
+shared parent, location, anomaly reason, detector, namespace, positive
+execution flags and filename structure. Its candidate abstraction
+generalizes numeric-token positions only when there is sufficient
+alphabetic anchor evidence. The final display pattern wildcards only
+positions that genuinely varied across the observed filenames.
+
+Families are shown with distinct-host count, original finding count,
+version count, 35%-of-stream concentration insight, evidence samples
+and direct drilldown into original findings. The SQL read is capped at
+20,000 findings with an explicit error beyond it, and up to 30 largest
+families are retained in the existing JSON State table. This is a
+bounded derived index, not an event copy or a new trusted-app list.
+The job is scheduled hourly when source catch-up is not active and
+may be started manually through the authenticated GUI; analysis
+worker serialization is unchanged. The counts-only API does not emit
+any filenames, paths, host names or group identifiers.
+
+No clustering result changes a finding's state, priority, suppression
+policy or event-time baseline. Repetition across machines is evidence
+of shared behavior, not proof of normal/legitimate activity. Evaluation
+of later unseen data and analyst labels is required before attempting
+automatic regrouping or ranking.
+
 ## Fast false-positive triage (v0.1.0a23)
 
 The finding list has two presentations: the original investigation cards

@@ -176,6 +176,31 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## DeepSnout finding-quality self-diagnosis (v0.1.0a24)
+
+The **Finding quality** page is an independent, read-only view of
+the past seven days' non-demo findings. DeepSnout automatically
+discovers recurring application/parent/location patterns, including
+version-number churn across different executable basenames, and
+highlights when a family dominates the finding stream. It does not
+use product-name signatures, threat allowlists, or internet lookups.
+Original alerts stay open with their existing states and priorities.
+
+The worker runs this diagnostic approximately hourly once source
+catch-up is complete. You can open **Finding quality -> Refresh
+analysis** to analyze already-existing findings immediately. Every
+family links to an internal page of supporting original findings.
+The separate authenticated endpoint `/api/finding-quality/metrics`
+is counts-only and suitable for constrained sharing review.
+
+A common pattern is not necessarily legitimate: deliberate attackers
+can produce the same broad repetition. The analysis identifies
+redundancy and rollout-like structure, not proven benign software.
+The snapshot has a 20,000-finding input cap (explicit failure rather
+than silent truncation), a top-30-family display, a seven-day
+observation window, and no schema migration. This release does not
+resolve existing false positives automatically.
+
 ## Review hundreds of findings in a table (v0.1.0a23)
 
 Open **Findings table** in the left navigation (or the table link from

@@ -1,4 +1,49 @@
-# Verification report - 0.1.0a23
+# Verification report - 0.1.0a24
+
+## Automatic self-diagnosis of finding repetition (0.1.0a24)
+
+Added a completely read-only, periodic `finding_quality` analysis job,
+a Finding quality navigation page, individual family drill-down, and a
+counts-only endpoint `/api/finding-quality/metrics`. The scanner reads
+already-created findings from the past seven days (based on finding
+creation time, all states, excluding namespace `demo`). It does not
+reprocess events, mutate findings, change priorities, or suppress
+anything. Operators can request refresh with their normal CSRF-protected
+session; the single analysis worker also schedules it about hourly after
+source catch-up (the worker is not starved for this diagnostic).
+
+This first family model clusters process-creation evidence only.
+It uses the same namespace, detector, novelty category, observed
+parent basename, image-location class and positive execution flags.
+It then compares observed executable-name shapes, with generic numeric
+tokens as possible variation points. A final learned display pattern
+wildcards ONLY numeric positions actually varying in observed variants.
+There are no vendor/Defender/installer exclusions or app-specific rules.
+It requires >=5 original findings on >=2 hosts to show a family;
+the initial concentration insight triggers when the dominant family
+accounts for >=35% of a window with >=20 findings.
+
+The source scan is explicitly capped at 20,000 findings, otherwise the
+job fails without writing a misleading partial snapshot. Up to 30
+largest families and their original finding IDs are kept in an
+app-local JSON State snapshot, with small illustrative filename lists.
+The snapshot includes counts, distinct hosts, variant counts,
+repeat/variant-churn signals, relative concentrations, and links to
+all supporting original findings (75 per detail page). The grouping
+does NOT tell operators which software is legitimate: it describes
+repetition, not benignness. A coordinated attack can appear across
+many hosts and must retain its original investigation value.
+
+Tests are wholly synthetic. A replay-shaped fixture checks automatic
+discovery of 442 related findings with eight varying numeric versions
+across 149 hosts in 457 total, independent of actual product names.
+Other tests check stable-name repetition, strict namespace/parent/
+location/detector/category boundaries, refusal to group short-random
+names, synthetic high-priority/malicious examples, demo exclusion,
+authenticated GUI/metrics/drilldown, worker scheduling, and job
+coalescing. No DB migration, remote AI service or enrichment dependency.
+The operator should refresh on existing findings after deploying and
+inspect both the dominant family and residual independent alerts.
 
 ## Sortable findings table and controlled CSV export (0.1.0a23)
 

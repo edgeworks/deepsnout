@@ -49,6 +49,17 @@ environment-relative application and launch-pattern novelty with an
 optional learned cohort comparison. Broader unsupervised, multivariate
 discovery and detector-specific historical peer quality remain next steps.
 
+## Findings should diagnose their own redundancy
+
+A self-diagnostic shadow process now groups related original findings
+from learned filename structure, parent processes, execution location,
+category and fleet repetition. It identifies excessive concentration
+without vendor-specific allowlisting or interpreting a widespread
+campaign as harmless. Analyst assessment and temporal validation are
+necessary before any future prioritization or automatic grouping of
+individual tickets. This is Phase 1 of a broader environment-understanding
+loop: make the structure and quality of discovery visible first.
+
 ## Next iterations
 
 Better application identity; richer pairwise novelty; process role/port change;
