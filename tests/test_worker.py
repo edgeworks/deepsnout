@@ -119,3 +119,45 @@ def test_single_writer(engine,config):
     with worker_lock(engine,config):
         with pytest.raises(RuntimeError):
             with worker_lock(engine,config): pass
+
+
+def test_finding_quality_job_is_coalesced_and_periodic_when_not_catching_up(engine, config):
+    from deepsnout.db import now
+    from deepsnout.worker import tick
+    stamp = now()
+    with transaction(engine) as db:
+        host = Host(id="quality-scheduler-host", name="schedule.example",
+                    namespace="test", cohort="unassigned",
+                    first_seen=stamp-120, last_seen=stamp)
+        db.add(host)
+        db.flush()
+        from deepsnout.db import Finding
+        db.add(Finding(
+            host_id=host.id, detector="DS-BEH-001",
+            context="test-context", title="Synthetic", summary="Synthetic",
+            priority="review", state="new", first_seen=stamp-10,
+            last_seen=stamp-10, created=stamp-10,
+            evidence={"process": {"parent": "service.exe", "image": "test.exe",
+                                  "location": "other"}}))
+        # Skip costly unrelated peer discovery during the isolated scheduler test.
+        set_state(db, "peer_group_last_attempt", {"at": stamp})
+    # tick schedules and executes a normal, local finding-quality job.
+    assert tick(engine, config)
+    with transaction(engine) as db:
+        jobs = list(db.scalars(select(Job).where(Job.kind == "finding_quality")))
+        assert len(jobs) == 1 and jobs[0].status == "done"
+        snapshot = db.get(State, "finding_quality_snapshot").value
+        assert snapshot["source_findings"] == 1
+        attempt = db.get(State, "finding_quality_last_attempt").value
+        assert attempt["at"] > 0
+    # A second tick inside the hour cannot schedule another duplicate job.
+    tick(engine, config)
+    with transaction(engine) as db:
+        assert len(list(db.scalars(select(Job).where(Job.kind == "finding_quality")))) == 1
+
+
+def test_finding_quality_queue_coalesces_duplicate_operator_requests(db):
+    first = enqueue(db, "finding_quality", {"origin": "operator"})
+    second = enqueue(db, "finding_quality", {"origin": "operator"})
+    assert first.id == second.id
+    assert db.get(State, "finding_quality_last_attempt").value["job_id"] == first.id

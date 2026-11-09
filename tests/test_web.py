@@ -332,3 +332,129 @@ def test_table_and_csv_require_authentication(engine, config):
         assert guest.get("/findings/table").status_code == 303
         assert guest.get("/findings/table.csv").status_code == 303
     app.state.engine.dispose()
+
+
+
+def _seed_finding_quality_example(db):
+    """This test never contains customer or actual detection names."""
+    from deepsnout.db import now
+    stamp = now()
+    hosts = [
+        Host(id=f"quality-host-{i}", name=f"quality-{i}.example",
+             namespace="synthetic", cohort="unassigned",
+             first_seen=stamp-3600, last_seen=stamp)
+        for i in range(6)
+    ]
+    db.add_all(hosts)
+    db.flush()
+    for i in range(18):
+        basename = f"SupportPackage_6.12.{i%3}.0.exe"
+        db.add(Finding(
+            host_id=hosts[i%len(hosts)].id,
+            detector="DS-BEH-001", context=f"quality-{i}",
+            title="Synthetic local novelty", summary="Synthetic",
+            priority="review", state="new",
+            first_seen=stamp-60-i, last_seen=stamp-60-i,
+            created=stamp-30,
+            evidence={
+                "process": {
+                    "app": basename.lower(), "parent": "installer-agent.exe",
+                    "location": "program-files",
+                    "image": rf"C:\Program Files\Demo\{basename}",
+                },
+                "environment": {"category": "rare_application"},
+            },
+        ))
+    # A non-execution finding must be included in total but not grouped.
+    db.add(Finding(
+        host_id=hosts[0].id, detector="DS-NET-001", context="net",
+        title="Synthetic network finding", summary="Synthetic",
+        priority="review", state="new",
+        first_seen=stamp-100, last_seen=stamp-100,
+        created=stamp-30, evidence={"app": "updater.exe"},
+    ))
+    # Synthetic demo observations are excluded from operational reporting.
+    demo = Host(id="quality-demo", name="demo.example", namespace="demo",
+                cohort="unassigned", first_seen=stamp-3600, last_seen=stamp)
+    db.add(demo)
+    db.flush()
+    db.add(Finding(
+        host_id=demo.id, detector="DS-BEH-001", context="ignored",
+        title="Excluded synthetic demo", summary="Synthetic",
+        priority="review", state="new", first_seen=stamp-50, last_seen=stamp-50,
+        created=stamp-30, evidence={
+            "process": {"image": "demo.exe", "parent": "unknown",
+                        "location": "other"},
+        },
+    ))
+
+
+def test_finding_quality_gui_scheduler_metrics_and_drilldown(browser, engine, config):
+    from deepsnout.db import State
+    from deepsnout.worker import enqueue
+    initial = browser.get("/finding-quality")
+    assert initial.status_code == 200
+    assert "No analysis snapshot yet" in initial.text
+    empty = browser.get("/api/finding-quality/metrics").json()
+    assert empty["updated_at"] is None
+
+    with transaction(engine) as db:
+        _seed_finding_quality_example(db)
+        job = enqueue(db, "finding_quality", {"origin": "operator"})
+        jid = job.id
+
+    assert run_job(engine, config, jid)
+    report = browser.get("/api/finding-quality/metrics")
+    assert report.status_code == 200
+    metrics = report.json()
+    assert metrics["source_findings"] == 19
+    assert metrics["dominant_family_findings"] == 18
+    assert metrics["families_discovered"] == 1
+    assert metrics["version_churn_families"] == 1
+    assert metrics["self_diagnosis"] == "one-family-dominance"
+    assert metrics["suppression_allowed"] is False
+    assert "SupportPackage" not in report.text
+    assert "quality-host" not in report.text
+
+    with transaction(engine) as db:
+        snapshot = db.get(State, "finding_quality_snapshot").value
+        assert len(snapshot["families"][0]["member_ids"]) == 18
+        assert not db.scalar(select(Finding).where(Finding.state != "new"))
+        group_id = snapshot["families"][0]["id"]
+
+    page = browser.get("/finding-quality")
+    assert page.status_code == 200, page.text
+    assert "supportpackage_6.12.*.0.exe" in page.text
+    assert "18</strong>" in page.text
+    assert "one behavior family" in page.text.lower()
+    assert group_id in page.text
+
+    detail = browser.get("/finding-quality/families/" + group_id)
+    assert detail.status_code == 200, detail.text
+    assert "installer-agent.exe" in detail.text
+    assert "quality-1.example" in detail.text
+    assert "supportpackage_6.12.*.0.exe" in detail.text
+    assert detail.text.count('href="/findings/') >= 18
+    assert browser.get("/finding-quality/families/not-a-group").status_code == 404
+    assert post(browser, "/finding-quality/refresh").status_code == 303
+
+
+def test_finding_quality_requires_session_and_write_role(engine, config, browser):
+    from fastapi.testclient import TestClient
+    client_app = create_app(config)
+    with TestClient(client_app, follow_redirects=False) as guest:
+        for path in ["/finding-quality", "/api/finding-quality/metrics",
+                     "/finding-quality/families/unknown"]:
+            assert guest.get(path).status_code == 303
+        assert guest.post("/finding-quality/refresh", data={}).status_code == 403
+    client_app.state.engine.dispose()
+
+    assert post(browser, "/accounts", username="qualityviewer",
+                password="Quality viewer safe test passphrase",
+                role="viewer").status_code == 303
+    assert post(browser, "/logout").status_code == 303
+    browser.get("/login")
+    assert post(browser, "/login", username="qualityviewer",
+                password="Quality viewer safe test passphrase").status_code == 303
+    assert browser.get("/finding-quality").status_code == 200
+    assert post(browser, "/finding-quality/refresh").status_code == 403
