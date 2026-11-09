@@ -176,6 +176,32 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## Review hundreds of findings in a table (v0.1.0a23)
+
+Open **Findings table** in the left navigation (or the table link from
+the investigation inbox). The separate table lists Last seen, Detector,
+Hostname, Parent, Process (path) and Trigger. You can sort any column,
+filter by detector and status, narrow DS-BEH-001 to 'Rare application'
+versus 'Rare launch relationship', or search hostnames, parent names
+and process paths. Click a hostname to open the original finding.
+
+Use **Export full CSV** for on-premises review, or
+**Export privacy-reduced CSV** to help compare false-positive patterns
+without exporting raw hostnames or directory paths. A new host alias
+is generated per export, consistent across rows in that export.
+Privacy-reduced paths retain only the process location class and
+executable basename; timestamps are reduced to dates. Bespoke program
+names and other remaining values may still be identifying: inspect the
+file before sharing outside your organization. Exports honor active
+filters, contain all matching findings (not only one table page), and
+reject requests exceeding 10,000 rows rather than silently truncating.
+
+The parent process is the retained basename, not its full path. For
+DS-NET-001 the original evidence has only an application basename
+without a process path, so the table reports that limitation instead
+of inventing a path. The original card view, detail pages and all
+detectors remain unchanged.
+
 ## Understanding zero findings
 
 From v0.1.0a22, the authenticated

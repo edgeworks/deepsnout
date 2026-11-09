@@ -1,4 +1,38 @@
-# Verification report - 0.1.0a22
+# Verification report - 0.1.0a23
+
+## Sortable findings table and controlled CSV export (0.1.0a23)
+
+The original card-based investigation inbox remains available. A separate
+authenticated `/findings/table` view shows six columns: last seen (UTC),
+detector, hostname, parent executable basename, process image path and
+a compact trigger description. The trigger for DS-BEH-001 includes the
+relevant fleet rarity counts; DS-NET-001 includes observed destination
+diversity versus prior p95. Data is drawn from frozen finding evidence,
+not rebuilt from ingestion. A later repeat updates Last seen but not the
+original evidence snapshot. Network findings do not retain a process
+image path, so their application basename is labeled 'path unavailable'.
+
+The table supports status, detector, behavioral category and literal
+hostname/parent/process search; SQL-backed sortable columns and
+100-row pages apply to all matching findings, not only the current page.
+`/findings/table.csv` exports all filtered rows in the same order, up
+to an explicit 10,000-row cap. Larger exports return HTTP 413 and must
+be filtered; data is never silently truncated. The full CSV retains
+internal hostnames and redacted image paths; a 'privacy-reduced' mode
+generates new per-export HMAC host aliases, reduces timestamps to UTC
+dates, and collapses process paths into normalized location classes
+and executable basenames. These are still potentially identifying
+(e.g., bespoke executable names); operators must inspect any CSV
+before external sharing. Both exports are authenticated and include
+spreadsheet formula-injection safeguards. Existing middleware prevents
+caching and sets restrictive content and framing policies.
+
+Synthetic tests cover each detector's evidence variant, mixed findings,
+server-side JSON-field sorting on SQLite and PostgreSQL, category and
+text filters, 100-row pagination vs complete CSV export, authenticated
+access, CSV quoting/spreadsheet formulas, and the limits of the
+privacy-reduced export. No schema migration, detector tuning, or new
+external network calls are introduced.
 
 ## Observable environment-relative detection funnel (0.1.0a22)
 

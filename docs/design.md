@@ -45,6 +45,20 @@ and fixed command flags. Hash/version churn alone does not change it. This modes
 v1 identity can conflate same-named binaries in the same class, and a path class is
 not a verified writable ACL. Hashes and original source references remain evidence.
 
+## Fast false-positive triage (v0.1.0a23)
+
+The finding list has two presentations: the original investigation cards
+and a compact sortable table. A row reflects the first frozen evidence
+snapshot (parent basename and redacted executable path where recorded)
+and the finding's current last-seen timestamp. A network finding only
+stores an application basename, not a launch path. Filtered exports
+include all findings within an explicit cap, independent of page size.
+The privacy-reduced export assigns random-keyed host pseudonyms within
+each file and summarizes locations, but it cannot guarantee anonymity
+of executable names or trigger metadata. CSV cells are escaped against
+spreadsheet formula interpretation. All exports require a normal session;
+no data is sent to external services.
+
 ## Stored data and privacy
 
 Hosts, cohort labels and observed-day source coverage; fingerprints; process GUID
