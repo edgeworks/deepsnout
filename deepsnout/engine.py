@@ -167,7 +167,8 @@ def _preload_by_id(db, model, ids, chunk=500):
     return rows
 
 
-def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="unassigned", historical=False):
+def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="unassigned",
+           historical=False, on_progress=None):
     clock = now() if clock is None else clock
     cfg = policy(db)
     report = {"accepted": 0, "duplicates": 0, "outside_retention": 0,
@@ -195,6 +196,8 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
     for offset in range(0, len(ids), 500):
         known.update(db.scalars(select(Seen.id).where(Seen.id.in_(ids[offset:offset + 500]))))
 
+    if on_progress:
+        on_progress(0, len(events))
     if historical:
         host_ids = {host_key(namespace, e.host) for e in events}
         hosts.update(_preload_by_id(db, Host, host_ids))
@@ -240,7 +243,9 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                     .group_by(BehaviorDay.host_id, BehaviorDay.day)):
                 context_counts[(hid, day)] = count
         report["historical_fast_path"] = "reference-and-state-elision"
-    for e in sorted(events, key=lambda x: (x.ts, x.event_id != 1)):
+    for position, e in enumerate(sorted(events, key=lambda x: (x.ts, x.event_id != 1)), 1):
+        if on_progress and position % 250 == 0:
+            on_progress(position, len(events))
         receipt = digest(namespace, e.id)
         if receipt in known:
             report["duplicates"] += 1
@@ -394,6 +399,8 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                 w.samples = [*w.samples, exact]
             if not historical:
                 w.evaluated = False
+    if on_progress:
+        on_progress(len(events), len(events))
     # Historical preloading may include a window whose corresponding event is
     # later skipped as duplicate/outside retention. Only windows actually touched
     # during this batch have an in-memory Diversity sketch.
