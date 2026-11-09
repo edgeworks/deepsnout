@@ -1,0 +1,87 @@
+{% extends 'base.html' %}
+{% block title %}Findings table &middot; DeepSnout{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">FAST BEHAVIORAL TRIAGE</p>
+    <h1>Findings table</h1>
+    <p>Compare parent and process patterns without opening each ticket. Parent is the executable name; process paths are redacted source evidence when available.</p>
+  </div>
+  <a class="button" href="/">Card view</a>
+</header>
+<section class="panel">
+  <form class="findings-table-filters" method="get" action="/findings/table">
+    <label>Detector
+      <select name="detector">
+        <option value="">All detectors</option>
+        {% for name in detectors %}
+        <option value="{{ name }}" {% if filters.detector == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Status
+      <select name="status">
+        {% for name in ['open','new','investigating','malicious','resolved','all'] %}
+        <option value="{{ name }}" {% if filters.status == name %}selected{% endif %}>{{ name|capitalize }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Behavior
+      <select name="category">
+        {% for value,label in [('all','All behaviors'),('rare_application','Rare application'),('rare_launch_relationship','Rare launch relationship')] %}
+        <option value="{{ value }}" {% if filters.category == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Find parent, process or hostname
+      <input name="q" value="{{ filters.q }}" placeholder="e.g. explorer.exe">
+    </label>
+    <input type="hidden" name="sort" value="{{ filters.sort }}">
+    <input type="hidden" name="order" value="{{ filters.order }}">
+    <button class="primary" type="submit">Apply filters</button>
+  </form>
+  <div class="findings-table-actions">
+    <div><strong>{{ total }}</strong> matching findings
+      <small>{{ 'Showing {}–{}'.format((page-1)*page_size+1, (page-1)*page_size + rows|length) if total else 'No matches' }} · Sorted across all matching findings</small>
+    </div>
+    <div class="actions">
+      <a class="button" href="{{ full_csv_url }}">Export full CSV</a>
+      <a class="button" href="{{ reduced_csv_url }}">Export privacy-reduced CSV</a>
+    </div>
+  </div>
+  <div class="table-scroll">
+    <table class="findings-table">
+      <thead><tr>
+        {% for key,label in [('when','Last seen (UTC)'),('detector','Detector'),('hostname','Hostname'),('parent','Parent'),('process','Process (path)'),('trigger','Trigger')] %}
+        <th scope="col">
+          <a href="{{ sort_links[key] }}">{{ label }}
+            {% if filters.sort == key %}<span aria-label="sorted {{ filters.order }}">{{ '↑' if filters.order == 'asc' else '↓' }}</span>{% endif %}
+          </a>
+        </th>
+        {% endfor %}
+      </tr></thead>
+      <tbody>
+        {% for item in rows %}
+        {% set r = item.row %}
+        <tr>
+          <td class="table-time">{{ r.when }}</td>
+          <td><span class="badge">{{ r.detector }}</span></td>
+          <td><a href="/findings/{{ item.finding.id }}" title="Open finding details">{{ r.hostname }}</a></td>
+          <td class="table-executable">{{ r.parent }}</td>
+          <td class="table-process">{{ r.process }}</td>
+          <td class="table-trigger">{{ r.trigger }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">No findings match these filters.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="pagination">
+    {% if previous_url %}<a href="{{ previous_url }}">&larr; Previous</a>{% endif %}
+    {% if next_url %}<a href="{{ next_url }}">Next &rarr;</a>{% endif %}
+  </div>
+  <p class="muted">Each row is a finding, not an individual event. Parent and process come from its first evidence snapshot; “Last seen” reflects later repetitions. Network findings retain only an application basename, not a full process path.</p>
+  <p class="muted">Full CSV includes hostnames and redacted process paths for internal analysis. Privacy-reduced CSV uses per-export host aliases, UTC dates, and broad process-location categories, but executable names may still be identifying. Review before sharing outside the organization.</p>
+</section>
+{% endblock %}

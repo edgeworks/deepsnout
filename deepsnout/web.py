@@ -6,13 +6,13 @@ import json
 from pathlib import Path
 import re
 import secrets
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, or_
 from . import __version__
 from .config import Config, Policy
 from .db import (make_engine, initialize, transaction, User, LoginSession, Source,
@@ -24,6 +24,7 @@ from .normalize import parse_payload, digest
 from .splunk import SplunkSettings, validate_url
 from .worker import enqueue
 from .engine import EXPECTABLE
+from .finding_table import finding_csv, finding_table_row
 from .features import psl_available
 from .analytical_cohorts import analytical_cohort_state, anonymized_cohort_metrics
 from .peer_groups import (suggestion_state, peer_group_catalog, approve_suggestion,
@@ -230,6 +231,137 @@ def create_app(config=None):
                 "endpoints": db.scalar(select(func.count()).select_from(Host)),
                 "sources": db.scalar(select(func.count()).select_from(Source).where(Source.enabled.is_(True)))}
             return view(request, "inbox.html", user=user, rows=rows, counts=counts, total=total, status=status, q=q, page=max(1,page))
+
+    # This read-only view is intentionally before /findings/{finding_id}.
+    # Starlette matches routes in definition order; otherwise "table" becomes an ID.
+    TABLE_PAGE_SIZE = 100
+    CSV_EXPORT_LIMIT = 10000
+    TABLE_STATES = ("open", "new", "investigating", "malicious",
+                    "resolved", "expected", "all")
+    TABLE_CATEGORIES = ("all", "rare_application", "rare_launch_relationship")
+    TABLE_SORTS = ("when", "detector", "hostname", "parent", "process", "trigger")
+
+    def _table_filters(status, detector, category, q, sort, order):
+        return {
+            "status": status if status in TABLE_STATES else "open",
+            "detector": str(detector)[:64],
+            "category": category if category in TABLE_CATEGORIES else "all",
+            "q": str(q).strip()[:120],
+            "sort": sort if sort in TABLE_SORTS else "when",
+            "order": order if order in ("asc", "desc") else "desc",
+        }
+
+    def _table_query(filters):
+        query = select(Finding, Host).join(Host)
+        state = filters["status"]
+        if state == "open":
+            query = query.where(Finding.state.in_(("new", "investigating", "malicious")))
+        elif state != "all":
+            query = query.where(Finding.state == state)
+        if filters["detector"]:
+            query = query.where(Finding.detector == filters["detector"])
+        if filters["category"] != "all":
+            query = query.where(
+                Finding.evidence["environment"]["category"].as_string()
+                == filters["category"])
+        if filters["q"]:
+            # Explicit wildcard escaping: search text is literal and bound.
+            needle = filters["q"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = "%" + needle + "%"
+            query = query.where(or_(
+                Host.name.ilike(pattern, escape="\\"),
+                Finding.evidence["process"]["parent"].as_string().ilike(
+                    pattern, escape="\\"),
+                Finding.evidence["process"]["image"].as_string().ilike(
+                    pattern, escape="\\"),
+                Finding.evidence["app"].as_string().ilike(pattern, escape="\\"),
+            ))
+        return query
+
+    def _table_order(query, filters):
+        fields = {
+            "when": Finding.last_seen,
+            "detector": Finding.detector,
+            "hostname": Host.name,
+            "parent": func.coalesce(
+                Finding.evidence["process"]["parent"].as_string(), ""),
+            "process": func.coalesce(
+                Finding.evidence["process"]["image"].as_string(),
+                Finding.evidence["app"].as_string(),
+                Finding.evidence["process"]["app"].as_string(), ""),
+            "trigger": func.coalesce(
+                Finding.evidence["environment"]["category"].as_string(),
+                Finding.detector),
+        }
+        field = fields[filters["sort"]]
+        order = field.asc() if filters["order"] == "asc" else field.desc()
+        return query.order_by(order, Finding.id.asc())
+
+    @app.get("/findings/table")
+    def findings_table(request: Request, status: str = "open",
+                       detector: str = "", category: str = "all",
+                       q: str = "", sort: str = "when",
+                       order: str = "desc", page: int = 1):
+        filters = _table_filters(status, detector, category, q, sort, order)
+        page = min(1000000, max(1, page))
+        with transaction(engine) as db:
+            user = login_user(request, db)
+            query = _table_query(filters)
+            total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+            results = db.execute(
+                _table_order(query, filters)
+                .offset((page - 1) * TABLE_PAGE_SIZE)
+                .limit(TABLE_PAGE_SIZE)).all()
+            rows = [{"finding": finding, "row": finding_table_row(finding, host)}
+                    for finding, host in results]
+            detectors = list(db.scalars(
+                select(Finding.detector).distinct().order_by(Finding.detector)))
+
+        def link(**changes):
+            return "/findings/table?" + urlencode({**filters, **changes})
+
+        sort_links = {}
+        for column in TABLE_SORTS:
+            direction = ("asc" if column == "when" else "desc")
+            if filters["sort"] == column:
+                direction = "asc" if filters["order"] == "desc" else "desc"
+            sort_links[column] = link(sort=column, order=direction, page=1)
+
+        return view(
+            request, "findings_table.html", user=user, rows=rows,
+            total=total, page=page, page_size=TABLE_PAGE_SIZE,
+            filters=filters, detectors=detectors,
+            categories=TABLE_CATEGORIES, sort_links=sort_links,
+            previous_url=link(page=page - 1) if page > 1 else None,
+            next_url=link(page=page + 1) if page * TABLE_PAGE_SIZE < total else None,
+            full_csv_url="/findings/table.csv?" + urlencode({**filters, "privacy": "full"}),
+            reduced_csv_url="/findings/table.csv?" + urlencode({**filters, "privacy": "reduced"}),
+        )
+
+    @app.get("/findings/table.csv")
+    def findings_table_csv(request: Request, status: str = "open",
+                           detector: str = "", category: str = "all",
+                           q: str = "", sort: str = "when",
+                           order: str = "desc", privacy: str = "full"):
+        if privacy not in ("full", "reduced"):
+            raise HTTPException(400, "Unknown CSV privacy mode")
+        filters = _table_filters(status, detector, category, q, sort, order)
+        with transaction(engine) as db:
+            login_user(request, db)
+            query = _table_query(filters)
+            total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+            if total > CSV_EXPORT_LIMIT:
+                raise HTTPException(
+                    413, "CSV would exceed 10,000 rows. Narrow filters; no rows were truncated.")
+            rows = db.execute(_table_order(query, filters)).all()
+            content = finding_csv(rows, privacy_reduced=privacy == "reduced")
+        date = datetime.now(timezone.utc).strftime("%Y%m%d")
+        prefix = "deepsnout-findings-private-" if privacy == "reduced" else "deepsnout-findings-"
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{prefix}{date}.csv"'},
+        )
 
     @app.get("/findings/{finding_id}")
     def finding_page(request: Request, finding_id: str):
