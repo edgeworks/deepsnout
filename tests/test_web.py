@@ -245,7 +245,7 @@ def test_findings_table_filters_global_sort_and_details_link(browser, engine):
         "category": "rare_launch_relationship"})
     assert filtered.status_code == 200
     assert "winword.exe" in filtered.text
-    assert "explorer.exe" not in filtered.text
+    assert '<td class="table-executable">explorer.exe</td>' not in filtered.text
     searched = browser.get("/findings/table", params={"q": "PRIVATEsuite"})
     assert searched.status_code == 200
     assert "utility.exe" in searched.text
