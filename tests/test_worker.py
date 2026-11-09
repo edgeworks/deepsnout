@@ -161,3 +161,123 @@ def test_finding_quality_queue_coalesces_duplicate_operator_requests(db):
     second = enqueue(db, "finding_quality", {"origin": "operator"})
     assert first.id == second.id
     assert db.get(State, "finding_quality_last_attempt").value["job_id"] == first.id
+
+
+def test_mixed_age_events_take_both_paths_and_keep_one_receipt(db):
+    """Mixed age must not send yesterday's backfill through live references."""
+    from conftest import DAY
+    from deepsnout.worker import ingest_age_partitioned
+    from deepsnout.db import BatchReceipt, Process, Finding
+    from deepsnout.engine import host_key
+    observations = [
+        evt(ts=CLOCK-60, n=993, Image=r"C:\Temp\recent-tool.exe"),
+        evt(ts=CLOCK-3*DAY, n=991),
+        evt(3, ts=CLOCK-35, n=993, Image=r"C:\Temp\recent-tool.exe"),
+        evt(ts=CLOCK-2*DAY, n=992),
+    ]
+    progress = []
+    result = ingest_age_partitioned(
+        db, observations, namespace="test", batch_id="test-mixed",
+        clock=CLOCK,
+        progress=lambda stage, details: progress.append((stage, details["processed"])))
+    assert result["age_partition"] == "mixed"
+    assert result["accepted"] == 4
+    assert result["historical_input_events"] == 2
+    assert result["live_input_events"] == 2
+    assert result["historical_process_state_skipped"] == 2
+    assert result["behavioral_pipeline"]["event1_historical_batch"] == 2
+    assert result["behavioral_pipeline"]["event1_recent"] == 1
+    assert result["historical_reference_queries_skipped"] == 2
+    assert count(db, BatchReceipt) == 1 and count(db, Seen) == 4
+    assert progress[0] == ("ingest-historical", 0)
+    assert progress[-1] == ("ingest-live", 2)
+    live = db.scalar(select(Process).where(Process.guid == observations[0].guid))
+    assert live.metadata_json["reference"]["prior_observed_days"] == 2
+    assert count(db, Process) == 1
+    stored = db.get(State, "last_ingest").value
+    assert stored["accepted"] == 4
+    assert stored["age_partition"] == "mixed"
+    # Whole-slice idempotency is preserved, even across the age boundary.
+    replay = ingest_age_partitioned(
+        db, observations, namespace="test", batch_id="test-mixed", clock=CLOCK)
+    assert replay["batch_replay"]
+    assert replay["accepted"] == 0 and replay["duplicates"] == 4
+    assert count(db, Seen) == 4 and count(db, BatchReceipt) == 1
+    assert count(db, Finding) == 0
+
+
+def test_mixed_age_failure_rolls_back_both_halves_and_receipt(engine, monkeypatch):
+    import pytest
+    from conftest import DAY
+    import deepsnout.worker as worker
+    from deepsnout.db import BatchReceipt, Coverage, BehaviorDay
+    events = [evt(n=997, ts=CLOCK-2*DAY), evt(n=998, ts=CLOCK-20)]
+    original = worker.ingest
+
+    def fail_live(*args, **kwargs):
+        if not kwargs["historical"]:
+            raise ValueError("Synthetic failure in live suffix")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "ingest", fail_live)
+    with pytest.raises(ValueError, match="Synthetic failure"):
+        with transaction(engine) as db:
+            worker.ingest_age_partitioned(
+                db, events, namespace="test", batch_id="failed-mixed", clock=CLOCK)
+    with transaction(engine) as db:
+        assert count(db, Seen) == 0
+        assert count(db, Coverage) == 0
+        assert count(db, BehaviorDay) == 0
+        assert count(db, BatchReceipt) == 0
+        assert db.get(State, "last_ingest") is None
+
+
+def test_mixed_age_splunk_poll_commits_checkpoint_and_job_report(engine, config):
+    from conftest import DAY
+    from deepsnout.db import BatchReceipt
+    sid, jid = source_job(engine, config)
+    class Mixed(Client):
+        def slice(self, start, end):
+            return [evt(n=871, ts=CLOCK-2*DAY),
+                    evt(n=872, ts=CLOCK-55),
+                    evt(3, n=872, ts=CLOCK-35)], {"received": 3}, end
+
+    assert run_job(engine, config, jid, client_factory=Mixed)
+    with transaction(engine) as db:
+        job = db.get(Job, jid)
+        report = job.report
+        assert db.get(Source, sid).checkpoint == CLOCK-540
+        assert job.status == "done"
+        assert report["age_partition"] == "mixed"
+        assert report["accepted"] == 3
+        assert report["historical_input_events"] == 1
+        assert report["live_input_events"] == 2
+        assert report["behavioral_pipeline"]["event1_historical_batch"] == 1
+        assert report["behavioral_pipeline"]["event1_recent"] == 1
+        assert report["historical_ingest_seconds"] >= 0
+        assert report["live_ingest_seconds"] >= 0
+        assert report["ingest_seconds"] >= 0
+        assert count(db, BatchReceipt) == 1
+
+
+def test_uniform_historical_poll_keeps_fast_path_and_batch_receipt(engine, config):
+    from conftest import DAY
+    from deepsnout.db import BatchReceipt, Process
+    sid, jid = source_job(engine, config)
+
+    class Older(Client):
+        def slice(self, start, end):
+            return [evt(n=901, ts=CLOCK-3*DAY),
+                    evt(n=902, ts=CLOCK-2*DAY)], {"received": 2}, end
+
+    assert run_job(engine, config, jid, client_factory=Older)
+    with transaction(engine) as db:
+        report = db.get(Job, jid).report
+        assert report["age_partition"] == "historical-only"
+        assert report["historical_fast_path"] == "reference-and-state-elision"
+        assert report["historical_input_events"] == 2
+        assert report["live_input_events"] == 0
+        assert report["window_evaluation_deferred"] is True
+        assert count(db, Process) == 0
+        assert count(db, Seen) == 2
+        assert count(db, BatchReceipt) == 1
