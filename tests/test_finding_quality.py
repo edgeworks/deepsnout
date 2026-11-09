@@ -33,7 +33,7 @@ def test_discovers_one_large_version_family_without_vendor_signatures():
     ]
     rows.extend(
         _row(442+i, name=f"unrelated-{i}.exe",
-             parent="other-agent.exe") for i in range(15)
+             parent=f"independent-{i}.exe") for i in range(15)
     )
     snapshot = summarize_finding_rows(rows, clock=2000)
     assert snapshot["source_findings"] == 457
