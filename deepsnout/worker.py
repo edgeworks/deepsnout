@@ -130,6 +130,92 @@ def worker_lock(engine, config):
             yield lambda: None
 
 
+
+INGEST_COUNTER_FIELDS = (
+    "accepted", "duplicates", "outside_retention", "future", "context_limit",
+    "missing_guid", "warnings", "historical_process_state_skipped",
+    "historical_reference_queries_skipped",
+)
+
+
+def ingest_age_partitioned(db, events, *, namespace, batch_id=None, clock=None,
+                           cohort="unassigned", progress=None):
+    """Ingest old events via the fast path, then live events, in one transaction.
+
+    The caller owns the session and source checkpoint. Old entries precede
+    recent entries in event-time order. Any failure rolls both groups back,
+    including the one batch receipt. Only numeric counts leave the worker.
+    """
+    clock = now() if clock is None else clock
+    cutoff = clock - LIVE_FINDING_HORIZON
+    old = [event for event in events if event.ts < cutoff]
+    live = [event for event in events if event.ts >= cutoff]
+
+    def process(part, historical, receipt=None):
+        stage = "ingest-historical" if historical else "ingest-live"
+
+        def report(position, total):
+            if progress is not None:
+                progress(stage, {"processed": position, "total": total})
+
+        start = time.monotonic()
+        result = ingest(
+            db, part, namespace=namespace, batch_id=receipt, clock=clock,
+            cohort=cohort, historical=historical,
+            on_progress=report if progress is not None else None)
+        return result, round(time.monotonic() - start, 3)
+
+    if not old or not live:
+        # Preserve the original exactly-once receipt for uniform-age batches.
+        is_historical = bool(old)
+        result, seconds = process(events, is_historical, batch_id)
+        return {
+            **result,
+            "age_partition": "historical-only" if is_historical else "live-only",
+            "historical_input_events": len(old),
+            "live_input_events": len(live),
+            "historical_ingest_seconds": seconds if is_historical else 0.0,
+            "live_ingest_seconds": 0.0 if is_historical else seconds,
+        }
+
+    # A receipt represents the WHOLE Splunk slice. Never mark either part
+    # committed separately; a replay must not count/process either part.
+    if batch_id and db.get(BatchReceipt, batch_id):
+        return {
+            "accepted": 0, "duplicates": len(events), "batch_replay": True,
+            "age_partition": "mixed",
+            "historical_input_events": len(old), "live_input_events": len(live),
+            "historical_ingest_seconds": 0.0, "live_ingest_seconds": 0.0,
+        }
+
+    historic_report, historic_seconds = process(old, True)
+    live_report, live_seconds = process(live, False)
+    result = {
+        key: int(historic_report.get(key, 0)) + int(live_report.get(key, 0))
+        for key in INGEST_COUNTER_FIELDS
+    }
+    pipeline = {}
+    for portion in (historic_report, live_report):
+        for label, count in portion.get("behavioral_pipeline", {}).items():
+            pipeline[label] = pipeline.get(label, 0) + int(count)
+    if pipeline:
+        result["behavioral_pipeline"] = pipeline
+    result.update({
+        "age_partition": "mixed",
+        "historical_fast_path": "historical-subset-only",
+        "historical_input_events": len(old),
+        "live_input_events": len(live),
+        "historical_ingest_seconds": historic_seconds,
+        "live_ingest_seconds": live_seconds,
+    })
+    if batch_id:
+        db.add(BatchReceipt(id=batch_id, namespace=namespace, received=clock))
+    # Engine.ingest writes an interim report for each portion. Replace it with
+    # the aggregate report in the same transaction before checkpoint commit.
+    set_state(db, "last_ingest", {**result, "at": clock, "namespace": namespace})
+    return result
+
+
 def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: None):
     with transaction(engine) as db:
         job = db.get(Job, job_id)
@@ -284,19 +370,20 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     raise ValueError("Source configuration changed during job; retry with the new configuration")
             if records is not None:
                 ingest_clock = now()
-                historical_batch = bool(records) and max(event.ts for event in records) < ingest_clock - LIVE_FINDING_HORIZON
                 ingest_started = time.monotonic()
-                ingest_report = ingest(db, records,
+                ingest_report = ingest_age_partitioned(
+                    db, records,
                     namespace=snapshot["namespace"] if snapshot else payload.get("namespace", "default"),
                     batch_id=payload.get("batch_id"), clock=ingest_clock,
                     cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned",
-                    historical=historical_batch)
+                    progress=progress)
                 result = {**result, **ingest_report}
                 result["ingest_seconds"] = round(time.monotonic() - ingest_started, 3)
-                if historical_batch:
+                if not ingest_report["live_input_events"]:
                     result["window_evaluation_deferred"] = True
                     result["evaluate_seconds"] = 0.0
                 else:
+                    progress("evaluate-network", {"windows_limit": 2000})
                     evaluate_started = time.monotonic()
                     result["network_findings_created"] = evaluate_windows(db, clock=ingest_clock)
                     result["evaluate_seconds"] = round(time.monotonic() - evaluate_started, 3)
