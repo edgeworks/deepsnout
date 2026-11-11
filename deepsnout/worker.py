@@ -791,46 +791,59 @@ def tick_insight(engine, config, guard=lambda: None):
                    heartbeat_key="worker_insight")
 
 
-def run_role(engine, config, role):
+def run_role(engine, config, role, shards=None):
     if role not in ("ingest", "analysis", "insight"):
         raise ValueError("Worker role must be ingest, analysis or insight")
+    shard_set = tuple(range(4)) if shards is None else tuple(sorted(set(shards)))
+    if role == "analysis":
+        if not shard_set or any(not 0 <= v < 4 for v in shard_set):
+            raise ValueError("Invalid analysis shard selection")
+        suffix = "_".join(map(str, shard_set))
+        worker_name = "analysis_" + suffix
+        lock_name = "analysis:" + ",".join(map(str, shard_set))
+    else:
+        worker_name, lock_name = role, role
+    owns_global_jobs = role != "analysis" or 0 in shard_set
     role_kinds = {
         "ingest": COLLECTION_JOB_KINDS,
         "analysis": DETECTION_JOB_KINDS,
         "insight": INSIGHT_JOB_KINDS,
     }
-    runner = {
-        "ingest": tick_ingest,
-        "analysis": tick_analysis,
-        "insight": tick_insight,
-    }[role]
-    with worker_lock(engine, config, role=role) as guard:
-        LOG.info("DeepSnout %s worker started", role)
-        # Recover only jobs OWNED by this role. Never fail another active
-        # worker's jobs because this container restarted.
-        with transaction(engine) as db:
-            for job in db.scalars(
-                    select(Job).where(Job.kind.in_(role_kinds[role]),
-                                      Job.status.in_(("running", "cancel_requested")))):
-                job.status, job.finished, job.error = (
-                    "failed", now(),
-                    "Worker restarted during this job. Transactional writes rolled back.")
-                if job.kind == "peer_groups":
-                    set_state(db, "peer_group_last_attempt", {
-                        "at": now(), "job_id": job.id, "recovered": True})
-                if job.kind == "finding_quality":
-                    set_state(db, QUALITY_ATTEMPT_KEY, {
-                        "at": now(), "job_id": job.id, "recovered": True})
-                if role == "ingest" and job.source_id:
-                    source = db.get(Source, job.source_id)
-                    if source:
-                        source.last_error = job.error
-                audit(db, "worker-" + role, "job.interrupted", job.id, job.kind)
+    cache = {}
+    with worker_lock(engine, config, role=lock_name) as guard:
+        LOG.info("DeepSnout %s worker started shards=%s", role, shard_set)
+        # Only the primary analysis worker recovers operator jobs. Another
+        # analysis replica restarting must not fail an active primary job.
+        if owns_global_jobs:
+            with transaction(engine) as db:
+                for job in db.scalars(select(Job).where(
+                        Job.kind.in_(role_kinds[role]),
+                        Job.status.in_(("running", "cancel_requested")))):
+                    job.status, job.finished, job.error = (
+                        "failed", now(),
+                        "Worker restarted during job; uncommitted writes rolled back.")
+                    if job.kind == "peer_groups":
+                        set_state(db, "peer_group_last_attempt", {
+                            "at": now(), "job_id": job.id, "recovered": True})
+                    if job.kind == "finding_quality":
+                        set_state(db, QUALITY_ATTEMPT_KEY, {
+                            "at": now(), "job_id": job.id, "recovered": True})
+                    if role == "ingest" and job.source_id:
+                        source = db.get(Source, job.source_id)
+                        if source:
+                            source.last_error = job.error
+                    audit(db, "worker-" + role, "job.interrupted", job.id, job.kind)
         while True:
             guard()
             try:
-                busy = runner(engine, config, guard=guard)
+                if role == "ingest":
+                    busy = tick_ingest(engine, config, guard=guard)
+                elif role == "insight":
+                    busy = tick_insight(engine, config, guard=guard)
+                else:
+                    busy = tick_analysis(engine, config, guard=guard,
+                                         shards=shard_set, cache=cache)
             except Exception:
-                LOG.exception("%s worker tick failed", role)
+                LOG.exception("%s worker tick failed", worker_name)
                 busy = False
             time.sleep(1 if busy else 3)
