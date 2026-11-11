@@ -73,14 +73,42 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  worker:
+  ingest-worker:
     <<: *app
-    command: [worker]
+    command: [ingest-worker]
     depends_on:
       init:
         condition: service_completed_successfully
     healthcheck:
-      test: [CMD, deepsnout, worker-health]
+      test: [CMD, deepsnout, worker-health, --role, ingest]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  analysis-worker:
+    <<: *app
+    command: [analysis-worker]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, deepsnout, worker-health, --role, analysis]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  insight-worker:
+    <<: *app
+    command: [insight-worker]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, deepsnout, worker-health, --role, insight]
       interval: 30s
       timeout: 10s
       retries: 3
