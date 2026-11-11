@@ -86,6 +86,11 @@ class StagedBatch(Base):
     cohort = Column(String(80), nullable=False, default="unassigned")
     collected_at = Column(Float, nullable=False)
     ingestion_clock = Column(Float, nullable=False)
+    # Four stable host partitions; every host stays in the same shard.
+    shard = Column(Integer, nullable=False, default=0)
+    lane = Column(String(12), nullable=False, default="backfill")
+    batch_parent = Column(String(64), nullable=False, default="")
+    store_bytes = Column(BigInteger, nullable=False, default=0)
     event_count = Column(Integer, nullable=False)
     processed = Column(Integer, nullable=False, default=0)
     compressed_events = Column(LargeBinary, nullable=True)
@@ -95,7 +100,11 @@ class StagedBatch(Base):
     stats = Column(JSON, nullable=False, default=dict)
     attempts = Column(Integer, nullable=False, default=0)
     finished = Column(Float, nullable=False, default=0)
-    __table_args__ = (Index("ix_staged_batch_queue", "status", "collected_at"),)
+    __table_args__ = (
+        Index("ix_staged_batch_queue", "status", "collected_at"),
+        Index("ix_staged_lane_shard_queue", "shard", "lane", "status", "collected_at"),
+        Index("ix_staged_parent", "batch_parent"),
+    )
 
 
 class Host(Base):
@@ -237,7 +246,7 @@ def make_engine(config):
     return engine
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def migrate_v2(engine, recover_interrupted=False):
@@ -251,7 +260,7 @@ def migrate_v2(engine, recover_interrupted=False):
             raise RuntimeError("No existing database schema; run deepsnout init")
         version = conn.execute(
             select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
-        if version == SCHEMA_VERSION:
+        if version == 2:
             return "Schema is already v2"
         if version != 1:
             raise RuntimeError("Expected existing schema v1; refusing unknown version")
@@ -273,9 +282,59 @@ def migrate_v2(engine, recover_interrupted=False):
                 update(Job).where(Job.status.in_(("running", "cancel_requested")))
                 .values(status="failed", finished=now(),
                         error="Interrupted by explicit v2 upgrade; source checkpoint not advanced"))
-        StagedBatch.__table__.create(conn, checkfirst=True)
-        conn.execute(update(State).where(State.key == "schema_version").values(value=SCHEMA_VERSION))
+        # v1->v2 must create the original v2 schema, not a future v3 table.
+        # The schema-v3 upgrade below performs the new column additions.
+        original = StagedBatch.__table__
+        legacy = original.to_metadata(
+            __import__("sqlalchemy").MetaData(),
+            name="staged_batches")
+        for name in ("shard", "lane", "batch_parent", "store_bytes"):
+            legacy._columns.remove(legacy.c[name])
+        legacy.create(conn, checkfirst=True)
+        conn.execute(update(State).where(State.key == "schema_version").values(value=2))
     return "Migrated schema v1 to v2"
+
+
+def migrate_v3(engine):
+    """Explicit v2 -> v3 upgrade. Stop workers and back up DB/secrets first.
+
+    Existing staged events remain on shard 0, in the catch-up lane, with
+    their original compressed bytes intact. The upgrade never discards data.
+    """
+    with engine.begin() as conn:
+        if not inspect(conn).has_table("state"):
+            raise RuntimeError("No database; run deepsnout init")
+        version = conn.execute(
+            select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
+        if version == 3:
+            return "Schema is already v3"
+        if version != 2:
+            raise RuntimeError("Expected schema v2; upgrade v1 to v2 first")
+        if conn.dialect.name == "postgresql":
+            for key in (174220601, 174220602, 174220603, 174220611, 174220612):
+                if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": key}):
+                    raise RuntimeError("Worker still running; stop all workers before migration")
+        columns = {col["name"] for col in inspect(conn).get_columns("staged_batches")}
+        additions = {
+            "shard": "INTEGER NOT NULL DEFAULT 0",
+            "lane": "VARCHAR(12) NOT NULL DEFAULT 'backfill'",
+            "batch_parent": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "store_bytes": "BIGINT NOT NULL DEFAULT 0",
+        }
+        for name, sql_type in additions.items():
+            if name not in columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE staged_batches ADD COLUMN " + name + " " + sql_type)
+        conn.exec_driver_sql(
+            "UPDATE staged_batches SET batch_parent = id WHERE batch_parent = ''")
+        size_func = "octet_length" if conn.dialect.name == "postgresql" else "length"
+        conn.exec_driver_sql(
+            "UPDATE staged_batches SET store_bytes = " +
+            size_func + "(compressed_events) WHERE compressed_events IS NOT NULL")
+        for idx in StagedBatch.__table__.indexes:
+            idx.create(conn, checkfirst=True)
+        conn.execute(update(State).where(State.key == "schema_version").values(value=3))
+    return "Migrated schema v2 to v3"
 
 
 def initialize(engine):
@@ -286,7 +345,7 @@ def initialize(engine):
             if not version or version.value != SCHEMA_VERSION:
                 raise RuntimeError(
                     "Database schema upgrade required. Back up PostgreSQL and secrets, "
-                    "stop the old worker, then run 'deepsnout migrate-v2'.")
+                    "stop all workers, then run 'deepsnout migrate-v3'.")
     Base.metadata.create_all(engine)
     with sessionmaker(engine).begin() as db:
         if not db.get(State, "schema_version"):
