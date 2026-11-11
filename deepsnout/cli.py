@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--username")
     parser.add_argument("--role", choices=["ingest", "analysis", "insight"],
                         default="analysis")
+    parser.add_argument("--recover-interrupted", action="store_true",
+                        help="With migrate-v2, mark stopped v1 jobs as failed")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.command == "version":
@@ -64,7 +66,7 @@ def main():
     engine = make_engine(config)
     if args.command == "migrate-v2":
         from .db import migrate_v2
-        print(migrate_v2(engine))
+        print(migrate_v2(engine, recover_interrupted=args.recover_interrupted))
         return
     if args.command == "validate-cohorts":
         from .temporal_validation import run_temporal_shadow_validation

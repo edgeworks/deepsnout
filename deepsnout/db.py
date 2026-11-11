@@ -4,7 +4,7 @@ import uuid
 from contextlib import contextmanager
 from sqlalchemy import (create_engine, event, Column, String, Integer, BigInteger,
                         Float, Boolean, JSON, Text, Index, ForeignKey, LargeBinary, select,
-                        update, inspect)
+                        update, inspect, text)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from .config import Policy
 
@@ -240,7 +240,7 @@ def make_engine(config):
 SCHEMA_VERSION = 2
 
 
-def migrate_v2(engine):
+def migrate_v2(engine, recover_interrupted=False):
     """Explicit v1 -> v2 migration. Stop worker containers and back up first.
 
     A separate transaction installs the new table and updates the schema
@@ -255,11 +255,24 @@ def migrate_v2(engine):
             return "Schema is already v2"
         if version != 1:
             raise RuntimeError("Expected existing schema v1; refusing unknown version")
+        if conn.dialect.name == "postgresql":
+            # The old worker owns this advisory lock for its whole lifetime.
+            # Do not permit the migration while it is still running.
+            if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(174220601)")):
+                raise RuntimeError("Old analysis worker is still active; stop it before migrating")
         active = conn.execute(
             select(Job.id).where(Job.status.in_(("running", "cancel_requested")))
             .limit(1)).first()
+        if active and not recover_interrupted:
+            raise RuntimeError(
+                "Interrupted jobs remain. Stop the old worker, then rerun "
+                "'deepsnout migrate-v2 --recover-interrupted'. This marks "
+                "unfinished jobs failed but does not move Splunk checkpoints.")
         if active:
-            raise RuntimeError("A running job exists. Stop the old worker and resolve it before migrating")
+            conn.execute(
+                update(Job).where(Job.status.in_(("running", "cancel_requested")))
+                .values(status="failed", finished=now(),
+                        error="Interrupted by explicit v2 upgrade; source checkpoint not advanced"))
         StagedBatch.__table__.create(conn, checkfirst=True)
         conn.execute(update(State).where(State.key == "schema_version").values(value=SCHEMA_VERSION))
     return "Migrated schema v1 to v2"
