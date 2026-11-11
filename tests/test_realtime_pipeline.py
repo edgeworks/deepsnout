@@ -234,15 +234,16 @@ def test_v3_schema_column_upgrade_preserves_compressed_batch(engine):
         old_bytes = bytes(row.compressed_events)
         row.store_bytes = 0
         row.batch_parent = ""
-    from deepsnout.db import migrate_v3
+    from deepsnout.db import migrate_v3, migrate_v4
     assert migrate_v3(engine) == "Migrated schema v2 to v3"
+    assert migrate_v4(engine) == "Migrated schema v3 to v4"
     initialize(engine)
     with transaction(engine) as db:
         row = db.get(StagedBatch, "pre-v3-record")
         assert row.batch_parent == row.id
         assert row.store_bytes == len(old_bytes)
         assert row.compressed_events == old_bytes
-        assert db.get(State, "schema_version").value == 3
+        assert db.get(State, "schema_version").value == 4
 
 
 

@@ -9,7 +9,7 @@ from sqlalchemy import select, func
 from conftest import CLOCK, DAY, evt, count
 from deepsnout.db import (
     transaction, Base, State, StagedBatch, Seen, Host, Process,
-    BatchReceipt, Source, Finding, initialize, migrate_v2, migrate_v3, now,
+    BatchReceipt, Source, Finding, initialize, migrate_v2, migrate_v3, migrate_v4, now,
 )
 from deepsnout.pipeline import (
     stage_observations, process_next_batch, queued_metrics, queue_has_room,
@@ -29,8 +29,8 @@ def _stage(db, records, *, token="first", clock=CLOCK, namespace="synthetic"):
         namespace=namespace, cohort="unassigned", collected_clock=clock)
 
 
-def test_schema_version_three_on_fresh_database(db):
-    assert db.get(State, "schema_version").value == 3
+def test_schema_version_four_on_fresh_database(db):
+    assert db.get(State, "schema_version").value == 4
     assert count(db, StagedBatch) == 0
 
 
@@ -47,10 +47,13 @@ def test_explicit_v1_migration_is_safe_and_preserves_existing_data(engine):
     with pytest.raises(RuntimeError, match="migrate-v3"):
         initialize(engine)
     assert migrate_v3(engine) == "Migrated schema v2 to v3"
+    with pytest.raises(RuntimeError, match="migrate-v4"):
+        initialize(engine)
+    assert migrate_v4(engine) == "Migrated schema v3 to v4"
     initialize(engine)
-    assert migrate_v3(engine) == "Schema is already v3"
+    assert migrate_v4(engine) == "Schema is already v4"
     with transaction(engine) as db:
-        assert db.get(State, "schema_version").value == 3
+        assert db.get(State, "schema_version").value == 4
         assert db.get(Host, "survives-v2") is not None
         assert count(db, StagedBatch) == 0
 

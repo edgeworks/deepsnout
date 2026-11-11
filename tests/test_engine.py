@@ -169,3 +169,64 @@ def test_ingest_progress_is_numeric_and_covers_entire_history(db):
     assert report["accepted"] == 251
     assert stamps == [(0, 251), (250, 251), (251, 251)]
     assert count(db, Process) == 0
+
+
+
+def test_expired_network_windows_are_excluded_without_bulk_updates(db):
+    """No full-scan UPDATE of old windows on every analyzed shard/batch."""
+    from sqlalchemy import event as sql_event
+    from deepsnout.engine import WINDOW
+    hid = "synthetic-network-read-host"
+    db.add(Host(id=hid, name="network-test.example", namespace="test",
+                cohort="unassigned", first_seen=CLOCK - 3*DAY, last_seen=CLOCK))
+    old = Window(id="expired-unprocessed", host_id=hid, start=CLOCK-DAY-WINDOW,
+                 app="synthetic.exe", location="system", kind="domain",
+                 evaluated=False, count=1, distinct_count=1, samples=[])
+    new = Window(id="current-unprocessed", host_id=hid, start=CLOCK-2*WINDOW,
+                 app="synthetic.exe", location="system", kind="domain",
+                 evaluated=False, count=1, distinct_count=1, samples=[])
+    db.add_all((old, new))
+    db.flush()
+    observed = []
+
+    def monitor(_conn, _cursor, statement, _params, _context, _many):
+        if statement.lstrip().upper().startswith("UPDATE NETWORK_WINDOWS"):
+            observed.append(statement)
+
+    sql_event.listen(db.bind, "before_cursor_execute", monitor)
+    try:
+        assert evaluate_windows(db, clock=CLOCK, host_ids={hid}) == 0
+        db.flush()
+    finally:
+        sql_event.remove(db.bind, "before_cursor_execute", monitor)
+    assert not old.evaluated
+    assert new.evaluated
+    # The only UPDATE may be a bounded ORM flush by row primary key.
+    assert all(" WHERE network_windows.id " in statement for statement in observed)
+
+
+def test_v4_composite_and_partial_indexes_survive_explicit_migration(engine):
+    from sqlalchemy import inspect
+    from deepsnout.db import migrate_v4
+    target_indexes = {
+        "ix_behavior_host_context_day": BehaviorDay,
+        "ix_coverage_host_event_day": Coverage,
+        "ix_window_active_host_start": Window,
+    }
+    for name, model in target_indexes.items():
+        next(idx for idx in model.__table__.indexes if idx.name == name).drop(
+            engine, checkfirst=True)
+    with engine.begin() as conn:
+        from deepsnout.db import State
+        conn.execute(
+            State.__table__.update().where(State.key == "schema_version")
+            .values(value=3))
+    assert migrate_v4(engine) == "Migrated schema v3 to v4"
+    assert migrate_v4(engine) == "Schema is already v4"
+    for name, model in target_indexes.items():
+        assert name in {idx["name"] for idx in
+                        inspect(engine).get_indexes(model.__tablename__)}
+    with engine.connect() as conn:
+        from deepsnout.db import State
+        assert conn.execute(select(State.value).where(
+            State.key == "schema_version")).scalar_one() == 4
