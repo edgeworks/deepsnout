@@ -616,22 +616,25 @@ def tick_analysis(engine, config, guard=lambda: None):
     _role_heartbeat(engine, "analysis", "idle")
     with transaction(engine) as db:
         batch = next_pending_batch(db)
-        if batch and batch.status == "failed":
+        blocked = bool(batch and batch.status == "failed")
+        maintenance_id = None
+        if blocked:
             set_state(db, "worker_analysis", {
                 "heartbeat": now(), "state": "blocked-on-failed-batch",
                 "detail": queued_metrics(db)})
-            # An explicit retention job can still run to recover from receipt
-            # capacity exhaustion; it never skips or analyzes later batches.
+            # An explicitly queued retention job can recover exhausted receipt
+            # capacity. Never run it in an open heartbeat transaction.
             maintenance_job = db.scalar(
                 select(Job).where(Job.status == "queued",
                                   Job.kind == "maintenance")
                 .order_by(Job.created).limit(1))
-            job_id = maintenance_job.id if maintenance_job else None
-            if job_id:
-                return run_job(engine, config, job_id, guard=guard,
-                               heartbeat_key="worker_analysis")
-            return False
-        batch_id = batch.id if batch else None
+            maintenance_id = maintenance_job.id if maintenance_job else None
+        batch_id = batch.id if batch and not blocked else None
+    if blocked:
+        if maintenance_id:
+            return run_job(engine, config, maintenance_id, guard=guard,
+                           heartbeat_key="worker_analysis")
+        return False
     if batch_id:
         def report(stage, detail=None):
             guard()
