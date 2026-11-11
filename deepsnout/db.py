@@ -167,9 +167,14 @@ class BehaviorDay(Base):
     first_seen = Column(Float, nullable=False)
     last_seen = Column(Float, nullable=False)
     sample = Column(JSON, nullable=False, default=dict)
-    __table_args__ = (Index("ix_behavior_host_day", "host_id", "day"),
-                      Index("ix_behavior_context_day", "context", "day"),
-                      Index("ix_behavior_app_day", "app", "day"))
+    __table_args__ = (
+        Index("ix_behavior_host_day", "host_id", "day"),
+        Index("ix_behavior_context_day", "context", "day"),
+        Index("ix_behavior_app_day", "app", "day"),
+        # Exact local novelty reference path: host + execution context
+        # with the previous completed-day window.
+        Index("ix_behavior_host_context_day", "host_id", "context", "day"),
+    )
 
 
 class Window(Base):
@@ -186,7 +191,14 @@ class Window(Base):
     samples = Column(JSON, nullable=False, default=list)
     evaluated = Column(Boolean, nullable=False, default=False)
     reference_ok = Column(Boolean, nullable=False, default=True)
-    __table_args__ = (Index("ix_window_reference", "host_id", "app", "location", "kind", "start"),)
+    __table_args__ = (
+        Index("ix_window_reference", "host_id", "app", "location", "kind", "start"),
+        # Only active windows in a given host shard are scanned; expired
+        # windows are skipped in evaluate_windows and deleted by retention.
+        Index("ix_window_active_host_start", "host_id", "start",
+              postgresql_where=evaluated.is_(False),
+              sqlite_where=evaluated.is_(False)),
+    )
 
 
 class Finding(Base):

@@ -479,16 +479,20 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
 def evaluate_windows(db, clock=None, limit=2000, host_ids=None):
     clock = now() if clock is None else clock
     cfg = policy(db)
-    old_windows = update(Window).where(
-        Window.start < clock - DAY, Window.evaluated.is_(False))
+    # Previously every 400-event batch ran an unbounded UPDATE over every
+    # expired, unevaluated network window for the hosts in that batch. This
+    # repeatedly read historical table pages even when no detection was due.
+    # Expired windows are ineligible for live detection; retention eventually
+    # removes them. Exclude them with a bounded indexed SELECT, without any
+    # write to the historic rows. Preserve the original 24h eligibility cutoff.
     current_windows = select(Window).where(
-        Window.evaluated.is_(False), Window.start + WINDOW <= clock - 300)
+        Window.evaluated.is_(False),
+        Window.start >= clock - DAY,
+        Window.start <= clock - 300 - WINDOW)
     if host_ids is not None:
         if not host_ids:
             return 0
-        old_windows = old_windows.where(Window.host_id.in_(host_ids))
         current_windows = current_windows.where(Window.host_id.in_(host_ids))
-    db.execute(old_windows.values(evaluated=True))
     rows = list(db.scalars(current_windows.order_by(Window.start).limit(limit)))
     references, created = {}, 0
     for w in rows:
