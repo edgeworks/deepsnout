@@ -250,9 +250,11 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         kind, payload = job.kind, dict(job.payload)
         source = db.get(Source, job.source_id) if job.source_id else None
         tuning_state = db.get(State, _tuning_key(source.id)) if source else None
+        tail_state = db.get(State, _tail_key(source.id)) if source else None
         snapshot = ({"id": source.id, "config": source.config, "credential": source.credential,
                      "namespace": source.namespace, "checkpoint": source.checkpoint,
-                     "tuning": dict(tuning_state.value) if tuning_state else {}} if source else None)
+                     "tuning": dict(tuning_state.value) if tuning_state else {},
+                     "tail": dict(tail_state.value) if tail_state else {}} if source else None)
         started_at = job.started
 
     def progress(stage, detail=None):
@@ -274,14 +276,14 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
         records, result, next_checkpoint = None, {}, None
         poll_tuning = None
         poll_latest = None
-        if kind in {"poll", "test"}:
+        if kind in {"poll", "tail_poll", "test"}:
             if not snapshot:
                 raise ValueError("Source no longer exists")
             settings = SplunkSettings.model_validate(snapshot["config"])
             configured_profile = settings.search_profile
             tuning = dict(snapshot.get("tuning") or {})
             profile_audit = False
-            if kind == "poll" and configured_profile == "auto":
+            if kind in ("poll", "tail_poll") and configured_profile == "auto":
                 detected = str(tuning.get("detected_profile", ""))
                 last_audit = float(tuning.get("profile_audit_at", 0) or 0)
                 if detected == "cribl_flat_sysmon" and now() - last_audit < PROFILE_AUDIT_INTERVAL:
@@ -296,7 +298,7 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     progress("splunk-" + kind)
                     return _cancel_requested(engine, job_id)
                 client.cancel_check = poll_check
-            if kind == "poll" and hasattr(client, "operation_deadline"):
+            if kind in ("poll", "tail_poll") and hasattr(client, "operation_deadline"):
                 client.operation_deadline = time.monotonic() + POLL_WALL_BUDGET
             try:
                 if kind == "test":
@@ -304,15 +306,24 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                 else:
                     latest = int(now()) - settings.lag
                     poll_latest = latest
-                    start = snapshot["checkpoint"] if snapshot["checkpoint"] is not None else latest - settings.lookback
+                    tail = snapshot.get("tail") or {}
+                    is_tail = kind == "tail_poll"
+                    if is_tail:
+                        if not tail.get("active"):
+                            raise ValueError("Live-tail cursor is no longer active")
+                        start = int(tail["checkpoint"])
+                        lane_end = latest
+                    else:
+                        start = snapshot["checkpoint"] if snapshot["checkpoint"] is not None else latest - settings.lookback
+                        lane_end = min(latest, int(tail["start"])) if tail.get("active") else latest
                     backlog = max(0, latest - start)
-                    catching_up = backlog > settings.window * 2
+                    catching_up = lane_end - start > settings.window * 2
                     ceiling = max(settings.window, settings.catchup_window) if catching_up else settings.window
                     spans = dict(tuning.get("spans") or {})
                     preferred_span = int(spans.get(settings.search_profile, settings.window) or settings.window)
                     preferred_span = max(1, min(ceiling, preferred_span))
                     collection_started = time.monotonic()
-                    end = min(latest, start + preferred_span)
+                    end = min(lane_end, start + preferred_span)
                     if start >= end:
                         records, next_checkpoint = [], start
                         result = {"received": 0, "slice_attempts": 1, "effective_span": 0,
@@ -326,12 +337,13 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                             last_span, ceiling, int(slice_report.get("received", 0)),
                             settings.max_events, int(slice_report.get("slice_attempts", 1)))
                         multi_slice = catching_up and settings.search_profile == "cribl_flat_sysmon"
-                        while (multi_slice and next_checkpoint < latest
-                                and len(reports) < CATCHUP_BATCH_MAX_SLICES
+                        max_slices = 2 if tail.get("active") and not is_tail else CATCHUP_BATCH_MAX_SLICES
+                        while (multi_slice and next_checkpoint < lane_end
+                                and len(reports) < max_slices
                                 and len(records) < CATCHUP_BATCH_MAX_EVENTS
                                 and time.monotonic() - collection_started < CATCHUP_COLLECTION_BUDGET):
                             sub_start = next_checkpoint
-                            sub_end = min(latest, sub_start + next_span)
+                            sub_end = min(lane_end, sub_start + next_span)
                             more, sub_report, next_checkpoint = client.slice(sub_start, sub_end)
                             records.extend(more)
                             reports.append(sub_report)
@@ -362,6 +374,8 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                     result["configured_search_profile"] = configured_profile
                     result["effective_search_profile"] = settings.search_profile
                     result["index_time_start"], result["index_time_end"] = start, next_checkpoint
+                    result["collection_lane"] = "live" if is_tail else "backfill"
+                    result["live_head_index_time"] = latest
                     result["index_seconds_processed"] = actual_span
                     result["backlog_seconds_before"] = backlog
                     result["backlog_seconds_after"] = max(0, latest - next_checkpoint)
@@ -393,7 +407,7 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                 ingest_clock = now()
                 ingest_started = time.monotonic()
                 if defer_analysis:
-                    if kind != "poll" or not snapshot or not payload.get("batch_id"):
+                    if kind not in ("poll", "tail_poll") or not snapshot or not payload.get("batch_id"):
                         raise ValueError("Only complete Splunk poll slices can use the durable handoff")
                     from .pipeline import stage_observations
                     progress("stage-observations", {"total": len(records)})
@@ -401,7 +415,8 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                         db, records, batch_id=payload["batch_id"],
                         source_id=snapshot["id"], namespace=snapshot["namespace"],
                         cohort=snapshot["config"].get("default_cohort", "unassigned"),
-                        collected_clock=ingest_clock)
+                        collected_clock=ingest_clock,
+                        lane="live" if kind == "tail_poll" else "backfill")
                     result.update(handoff)
                     result["stage_seconds"] = round(time.monotonic() - ingest_started, 3)
                     result["analysis_deferred"] = True
@@ -449,9 +464,25 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                 source.last_success, source.last_error = now(), ""
                 if kind == "poll":
                     source.checkpoint = next_checkpoint
+                    active_tail = snapshot.get("tail") or {}
+                    if active_tail.get("active") and next_checkpoint >= int(active_tail["start"]):
+                        # Catch-up covers up to tail_start; tail covers the rest.
+                        # This merge is safe only when both staging commits exist.
+                        source.checkpoint = max(next_checkpoint, int(active_tail["checkpoint"]))
+                        set_state(db, _tail_key(source.id), {
+                            **active_tail, "active": False, "merged_at": now(),
+                            "checkpoint": source.checkpoint})
+                        result["live_tail_merged"] = True
                     if poll_tuning is not None:
                         set_state(db, _tuning_key(source.id), poll_tuning)
-            if kind == "poll":
+                elif kind == "tail_poll":
+                    active_tail = snapshot.get("tail") or {}
+                    if not active_tail.get("active"):
+                        raise ValueError("Live-tail cursor was deactivated")
+                    set_state(db, _tail_key(source.id), {
+                        **active_tail, "checkpoint": next_checkpoint,
+                        "last_success": now(), "last_poll": now()})
+            if kind in ("poll", "tail_poll"):
                 result["wall_seconds"] = round(now() - started_at, 3)
                 processed = float(result.get("index_seconds_processed", 0) or 0)
                 result["index_seconds_per_wall_second"] = (
