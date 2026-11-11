@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a27, experimental local-first pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a28, experimental local-first pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -175,6 +175,44 @@ The direct development server is intentionally separate from the Compose deploym
 Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
+
+## Faster historical and live analysis SQL (v0.1.0a28)
+
+DeepSnout no longer updates all old unevaluated network-window rows
+after every 400-event analysis chunk. Such rows are outside the
+24-hour live detection horizon and are now excluded through an indexed
+range selection; normal retention removes them later. The detection
+window and existing findings are unchanged. Schema v4 adds three
+purpose-built indexes to reduce local-reference and window reads.
+
+**Upgrade from v0.1.0a27 (schema v3):** Back up PostgreSQL and the
+paired application/database secrets first. Ensure the DB is running.
+To reduce disk contention during index creation, pause the analytical
+workers while leaving the ingest worker running and live collection
+active:
+
+```bash
+docker compose stop analysis-worker analysis-worker-b insight-worker
+git pull --ff-only
+docker compose build
+docker compose run --rm --no-deps init migrate-v4
+docker compose up -d --no-build --remove-orphans
+docker compose exec -T analysis-worker deepsnout version
+```
+
+PostgreSQL builds the indexes `CONCURRENTLY` rather than blocking
+writes for the duration of the build. It still uses disk bandwidth,
+WAL and additional index space. Do not attempt this while storage is
+nearly full, and do not start the new v4 application containers
+until `migrate-v4` succeeds. If migration fails, leave the existing
+ingest container running and investigate the error. Backups remain
+necessary for a complete rollback.
+
+This is a targeted fix for SQL paths observed in one sanitized
+`pg_stat_activity` sample, not a guaranteed multiplier for throughput.
+Monitor analysis backlog, PostgreSQL I/O wait and active SQL after
+deployment. If other expensive query patterns remain, profile them
+before further parallelism or speculative changes.
 
 ## Near-real-time collection with background analytics (v0.1.0a27)
 

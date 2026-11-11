@@ -14,6 +14,25 @@ alternative. No broker, Redis, Node build chain, vector DB or externally loaded 
 A PostgreSQL session advisory lock prevents accidental parallel analysis writers;
 SQLite development uses flock. Normal GUI writes remain transactional.
 
+## Bounded network-window evaluation and local reference indexes (v0.1.0a28)
+
+The analyzer's per-batch network-window finalization previously ran an
+unbounded `UPDATE network_windows` marking old unevaluated windows as
+evaluated for every processed host shard. Because expired windows are
+not eligible for live findings, the evaluator now selects only the
+original live-eligible time range by `start` without writing old rows.
+Normal retention eventually removes old window rows. This preserves
+the event-time cutoff and fleet reference material.
+
+Composite indexes for `BehaviorDay(host_id,context,day)` and
+`Coverage(host_id,event_id,day)` target the local prior-day reference
+queries. A partial index on `Window(host_id,start)` for
+`evaluated IS FALSE` targets the scoped unprocessed-window lookup.
+The index-only v4 migration is explicit; PostgreSQL uses
+`CREATE INDEX CONCURRENTLY`, verifies validity, then advances the
+schema marker, allowing ongoing collection. It does not modify the
+staged event store or any source checkpoint.
+
 ## Fresh-first ingest and parallel host-shard analytics (v0.1.0a27)
 
 Ingestion is neutral: it normalizes and durably records observations and

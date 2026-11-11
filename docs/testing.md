@@ -1,4 +1,48 @@
-# Verification report - 0.1.0a27
+# Verification report - 0.1.0a28
+
+## SQL I/O reduction for analysis workers (0.1.0a28)
+
+The Nov 11 production PostgreSQL activity snapshot showed an 8.97s
+DataFileRead wait on `UPDATE network_windows SET evaluated` and a
+0.31s DataFileRead wait on `behavior_days` local-context COUNT.
+These are observations from one database sample, not a full query-profile
+or demonstrated per-batch timing reduction.
+
+The per-batch network window evaluator no longer executes a global/batched
+`UPDATE` to mark old windows as evaluated. Such windows were never
+eligible for live detection. An indexed time-range filter now selects
+only windows with `clock-DAY <= start <= clock-300-WINDOW`.
+Older unevaluated windows remain stored for existing historical
+reference comparisons and are eventually removed by the normal
+baseline retention policy. No new detections are generated from
+expired windows; the live detection cutoff is unchanged. This avoids
+writing old pages repeatedly and keeps source checkpoints unchanged.
+
+A v3 to v4 **index-only migration** adds:
+`ix_behavior_host_context_day (host_id,context,day)`,
+`ix_coverage_host_event_day (host_id,event_id,day)`, and
+`ix_window_active_host_start (host_id,start) WHERE evaluated IS FALSE`.
+These target the observed history lookup and the live window evaluation
+SELECT. No detector thresholds, historical evidence data, event
+identities, normalized observations, Splunk cursor or staging layout
+change. A fresh database creates the indexes as part of schema v4;
+an existing v3 deployment must explicitly run `deepsnout migrate-v4`
+after a PostgreSQL and encryption-secret backup.
+
+On PostgreSQL the indexes are created CONCURRENTLY with autocommit
+so live ingestion need not stop for the index build; migration only
+updates the schema marker after it verifies every index is valid.
+This can still consume substantial disk I/O and additional space while
+it runs. For conservative upgrades, pause analytical workers while
+keeping the collector running, then restart all services with v4 code.
+SQLite test migrations use regular transactional index creation.
+
+Regressions cover exact cutoff semantics (old windows not selected,
+eligible windows still evaluated), absence of unbounded bulk UPDATE,
+idempotent v4 migration, preservation of existing staged data across
+prior migrations, and index presence on SQLite/PostgreSQL. No live
+benchmark was performed; analyst should compare queue growth,
+chunk progress and actual SQL wait events after deployment.
 
 ## Fresh-first collection and host-partitioned analysis (0.1.0a27)
 
