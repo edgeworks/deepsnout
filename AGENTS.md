@@ -5,6 +5,12 @@ owner direction prioritizes meaningful behavioral findings and Python readabilit
 Enrichment is optional FUTURE work, not a gate for useful local analysis. Single
 account pacing is not license permission; no provider circumvention.
 
+Four stable host shards and independent live/backfill index-time cursors
+are now source-of-truth invariants. Do not change shard ownership without
+a migration or merge temporary live cursors before historical coverage is
+complete. An analytical failure must not stop neutral collection; only
+storage integrity/capacity can do so. Preserve partial-baseline caveats.
+
 Use the source as written, not old Greycode assumptions. Standard Sysmon ingestion,
 original timestamps, exact process attribution, prior-day references, bounded
 state and visible uncertainty are invariants. Do not invent causal chains, call

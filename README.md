@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a26, experimental local-first pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a27, experimental local-first pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -175,6 +175,75 @@ The direct development server is intentionally separate from the Compose deploym
 Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
+
+## Near-real-time collection with background analytics (v0.1.0a27)
+
+DeepSnout prioritizes **fresh collection**, even when analysis cannot keep up.
+An independent live-tail Splunk index-time cursor polls the newest available
+events. The existing source cursor continues historical catch-up and stops at
+the recorded live-tail start. When the gap is filled, the cursors merge without
+skipping an index-time interval. Source config changes invalidate that temporary
+tail anchor rather than merging incompatible searches.
+
+Each collected slice is normalized and split into four **stable host shards**
+within the same PostgreSQL transaction as its Splunk checkpoint. These are
+sensitive normalized events, not just summary counts; no material leaves the
+on-premises server. Live analysis has priority over background work at each
+400-event chunk boundary, while the two detector containers run disjoint host
+sets (0/2 and 1/3). Prior-day baseline evidence is explicitly marked
+incomplete on live events if historical backfill is still outstanding.
+
+Unlike v0.1.0a26, neither the event-count backlog nor a failed detector job
+blocks source collection. A failed batch blocks only its analysis lane/shard,
+can be retried, and never silently advances its analysis cursor. Collection
+stops only for actual collection failures, integrity failures, or a configured
+local store byte limit. Historical catch-up pauses at 75% of the store budget,
+reserving the remainder for fresh ingestion.
+
+By default the compressed observation store is limited to **4 GiB**, with
+successfully analyzed batches retained for **2 days** for local replay.
+The operator can set `DEEPSNOUT_STORE_BUDGET_GIB` and
+`DEEPSNOUT_STORE_RETENTION_DAYS` in the Compose environment (the latter
+is bounded to 1–7 days). This budget covers the staged compressed payloads,
+NOT the entire PostgreSQL database, its WAL or available filesystem space.
+Monitor disk free space independently; do not assume the budget prevents all
+disk exhaustion. Failed or unprocessed payloads are never discarded.
+
+The Operations page shows live collection lag, historical catch-up lag,
+pending live and background events, individual detector shards and stored
+bytes. Scheduled insight work pauses while detector backlog exceeds
+100,000 events or store utilization is high. Operator-triggered insight
+jobs remain available.
+
+**Upgrade from v0.1.0a26 (schema v2):** Stop all four existing workers and
+the web app, and back up PostgreSQL together with the encryption-secrets
+volumes. Update source and rebuild the containers. Then run the **explicit**
+`deepsnout migrate-v3` against the existing, running DB service; it retains
+all staged events and checkpoints. Example from the Compose project root:
+
+```bash
+docker compose stop ingest-worker analysis-worker insight-worker web
+git pull --ff-only
+docker compose build
+docker compose run --rm --no-deps init migrate-v3
+docker compose up -d --no-build --remove-orphans
+docker compose exec -T analysis-worker deepsnout version
+docker compose ps
+```
+
+If the VM was shut down, ensure the database service is running and healthy
+before the migration. If the migration fails, stop and investigate rather
+than repeatedly starting partially upgraded containers. Backups are
+required for rollback: restoring v2 code directly onto a v3 database is
+unsupported. New installations initialize v3 without a migration.
+
+**Limitations:** The source's configured Splunk indexing lag still applies.
+High database contention may make fresh processing slower than desired;
+host-sharded workers improve concurrency but cannot guarantee a fixed
+latency. While historical backfill is incomplete, some novelty baselines
+remain incomplete and findings are labeled accordingly; automatic
+historical reinterpretation of earlier live decisions is future work.
+The four-way host assignment must not change without a resharding migration.
 
 ## Independent worker roles and durable processing (v0.1.0a26)
 

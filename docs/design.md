@@ -6,13 +6,47 @@
 `features.py`: offline public-suffix grouping and fixed-size diversity.
 `engine.py`: reference comparison and deterministic findings.
 `splunk.py`: read-only search adapter. `worker.py`: durable jobs and one analysis
-writer. `web.py`: authenticated GUI. `db.py`: relational persistence.
+writers. `web.py`: authenticated GUI. `db.py`: relational persistence.
 `config.py`: validated policy. `security.py`: hashes, sessions and secret storage.
 
 Python/FastAPI, Jinja, SQLAlchemy and PostgreSQL. SQLite is a development/test
 alternative. No broker, Redis, Node build chain, vector DB or externally loaded UI.
 A PostgreSQL session advisory lock prevents accidental parallel analysis writers;
 SQLite development uses flock. Normal GUI writes remain transactional.
+
+## Fresh-first ingest and parallel host-shard analytics (v0.1.0a27)
+
+Ingestion is neutral: it normalizes and durably records observations and
+advances the source index-time cursor, without performing threat or
+anomaly assessments. A near-current live tail has its own checkpoint
+while historical source catch-up fills gaps; the cursors merge only
+after full interval coverage. Splunk index time controls collection
+and the original event timestamps control detector eligibility.
+
+Staged observations are host-sharded across four stable partitions,
+each shard written atomically with its parent source checkpoint.
+Two separate detector processes own disjoint subsets. Their
+per-shard analysis cursors commit in the same transaction as their
+observations, references and findings. A live observation preempts
+background analysis at bounded chunk boundaries. No shard may be
+claimed by two workers concurrently; explicit PostgreSQL advisory
+locks enforce that invariant. Changing shard count requires migration.
+
+The observation store is independent of analysis backlog. Analyzer
+failure has no authority to pause ingestion. Storage integrity or
+capacity may stop collection; a byte budget protects only staged
+payload storage, not the overall PostgreSQL disk. Historical catch-up
+uses a 75% soft reserve so that live ingestion retains headroom.
+Completed payloads remain on-premises for a short explicit retention
+period. Operators monitor actual disk usage separately.
+
+Each lane/shard has chronological processing order, but the live
+lane deliberately precedes historical backfill to maintain recent
+visibility. This can leave incomplete prior-day fleet references;
+recent evidence therefore identifies this limitation. Automatic
+reinterpretation of earlier findings after old data arrives is
+not yet provided. Detection must not claim an incomplete baseline
+is complete.
 
 ## Decoupled worker architecture (v0.1.0a26)
 

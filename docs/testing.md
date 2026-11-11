@@ -1,4 +1,58 @@
-# Verification report - 0.1.0a26
+# Verification report - 0.1.0a27
+
+## Fresh-first collection and host-partitioned analysis (0.1.0a27)
+
+Introduces an explicitly migrated schema v3. The local staging table gains
+stable host shard, collection lane (live/backfill), parent slice identity
+and compressed byte-count fields. Existing pending v2 batches migrate
+intact to shard 0/backfill, with their original payload and cursor.
+The source checkpoint still commits in the same database transaction as
+ALL host shards of a collected slice; if any staged write fails, no
+cursor is moved.
+
+The collector opens a live-tail index-time cursor whenever the source
+checkpoint is substantially behind the newest Splunk time. Its start
+anchor is fixed and preserved with the source signature; historical
+catch-up covers [old cursor, anchor), and the live tail covers
+[anchor, current head). After catch-up reaches anchor, one source
+checkpoint safely merges to the live cursor. Live polling is scheduled
+ahead of catch-up, and catch-up is processed in smaller slices while
+a tail is active. The configured Splunk indexing lag still applies.
+This changes collection behavior, not the original Sysmon event time.
+
+Collection is limited by a configurable compressed observation byte
+budget (default 4 GiB), NOT the number of unanalyzed events or a failed
+analytical job. Catch-up pauses at 75% of the budget to reserve storage
+for live collection. Compressed normalized events are retained locally
+for two days after analysis by default. Failed/unfinished records are
+retained regardless of age. The byte budget does not measure PostgreSQL
+heap/index/WAL growth or available filesystem capacity; monitoring the
+actual VM disk is an operator responsibility.
+
+The analyzer prioritizes live events between 400-event chunks and
+uses two independently locked processes assigned disjoint stable
+host shards 0/2 and 1/3. Overlapping shard assignments fail closed.
+The worker caches a bounded number of decoded batches and does not
+retransfer compressed blobs from PostgreSQL at every chunk. Each
+shard has an independent durable analysis cursor and separate counter
+states. The source's historical backfill being incomplete is noted in
+the evidence for recent observations, rather than silently assuming
+complete prior-day context. Existing baseline/detector thresholds
+remain unchanged. There is no automatic re-evaluation once an old
+reference gap is filled; operators must consider the uncertainty.
+A failed analysis shard cannot block unrelated shards or source
+collection. Scheduled peer-group and finding-quality refreshes
+yield while analytics backlog is high.
+
+Synthetic tests cover v2->v3 migration with payload preservation,
+host-shard partitioning, one atomic collection handoff, live-vs-backfill
+priority and chunk preemption, incomplete-baseline evidence,
+independent tail and catch-up checkpoints and gap-free merge,
+storage-only backpressure and reservation, analyzer failure isolation,
+per-shard writer locking and retention. Existing SQLite, PostgreSQL,
+and Docker tests remain compulsory, and tests never use organization
+telemetry. Production throughput and latency must be measured after
+deployment rather than claimed from these fixtures.
 
 ## Independent collection, detection and insight workers (0.1.0a26)
 
