@@ -31,6 +31,10 @@ def _tuning_key(source_id):
     return "splunk_tuning:" + source_id
 
 
+def _tail_key(source_id):
+    return "splunk_tail:" + source_id
+
+
 def _next_slice_span(current_span, ceiling, received, maximum, attempts):
     """Learn a useful slice duration without probing an oversized window every poll."""
     current_span = max(1, int(current_span))
@@ -89,7 +93,10 @@ def enqueue(db, kind, payload=None, source_id=None):
     if count >= 20:
         raise ValueError("Queue contains 20 pending jobs. Wait for the worker or inspect Operations")
     if source_id:
-        existing = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(ACTIVE_JOB_STATUSES)))
+        # Live and backfill have independent source cursors and jobs.
+        existing = db.scalar(select(Job).where(
+            Job.source_id == source_id, Job.kind == kind,
+            Job.status.in_(ACTIVE_JOB_STATUSES)))
         if existing:
             return existing
     if kind in {"peer_groups", "finding_quality"}:
@@ -109,6 +116,11 @@ def enqueue(db, kind, payload=None, source_id=None):
 @contextlib.contextmanager
 def worker_lock(engine, config, role="analysis"):
     lock_ids = {"analysis": 174220601, "ingest": 174220602, "insight": 174220603}
+    if role.startswith("analysis:"):
+        shards = tuple(int(v) for v in role.removeprefix("analysis:").split(","))
+        if not shards or any(not 0 <= v < 4 for v in shards):
+            raise ValueError("Invalid analysis shards")
+        lock_ids[role] = 174220610 + sum(1 << v for v in set(shards))
     if role not in lock_ids:
         raise ValueError("Unknown worker role")
     if engine.dialect.name == "postgresql":
@@ -142,7 +154,9 @@ INGEST_COUNTER_FIELDS = (
 
 
 def ingest_age_partitioned(db, events, *, namespace, batch_id=None, clock=None,
-                           cohort="unassigned", progress=None):
+                           cohort="unassigned", progress=None,
+                           counter_state_key="behavioral_discovery_pipeline",
+                           last_ingest_state_key="last_ingest"):
     """Ingest old events via the fast path, then live events, in one transaction.
 
     The caller owns the session and source checkpoint. Old entries precede
@@ -165,7 +179,9 @@ def ingest_age_partitioned(db, events, *, namespace, batch_id=None, clock=None,
         result = ingest(
             db, part, namespace=namespace, batch_id=receipt, clock=clock,
             cohort=cohort, historical=historical,
-            on_progress=report if progress is not None else None)
+            on_progress=report if progress is not None else None,
+            counter_state_key=counter_state_key,
+            last_ingest_state_key=last_ingest_state_key)
         return result, round(time.monotonic() - start, 3)
 
     if not old or not live:
@@ -215,7 +231,8 @@ def ingest_age_partitioned(db, events, *, namespace, batch_id=None, clock=None,
         db.add(BatchReceipt(id=batch_id, namespace=namespace, received=clock))
     # Engine.ingest writes an interim report for each portion. Replace it with
     # the aggregate report in the same transaction before checkpoint commit.
-    set_state(db, "last_ingest", {**result, "at": clock, "namespace": namespace})
+    set_state(db, last_ingest_state_key,
+              {**result, "at": clock, "namespace": namespace})
     return result
 
 
@@ -560,7 +577,7 @@ def run(engine, config):
 
 # v2 role-specific loops. Legacy run_job remains useful for local fixture and
 # import tests, but production poll jobs ONLY stage durable normalized batches.
-COLLECTION_JOB_KINDS = ("poll", "test")
+COLLECTION_JOB_KINDS = ("tail_poll", "poll", "test")
 DETECTION_JOB_KINDS = ("import", "demo", "remove_demo", "maintenance")
 INSIGHT_JOB_KINDS = ("peer_groups", "finding_quality")
 
