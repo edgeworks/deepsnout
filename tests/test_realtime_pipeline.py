@@ -243,3 +243,32 @@ def test_v3_schema_column_upgrade_preserves_compressed_batch(engine):
         assert row.store_bytes == len(old_bytes)
         assert row.compressed_events == old_bytes
         assert db.get(State, "schema_version").value == 3
+
+
+
+def test_overlapping_host_shard_writer_locks_are_rejected(engine, config):
+    import pytest
+    from deepsnout.worker import worker_lock
+    with worker_lock(engine, config, "analysis:0,2"):
+        with worker_lock(engine, config, "analysis:1,3"):
+            pass
+        with pytest.raises(RuntimeError):
+            with worker_lock(engine, config, "analysis:0"):
+                pass
+
+
+def test_live_reference_is_explicitly_incomplete_while_backfill_is_unprocessed(engine):
+    from deepsnout.db import Process
+    host = _host(2)
+    with transaction(engine) as db:
+        _stage(db, "old-reference", host,
+               lane="backfill", timestamp=CLOCK-3*DAY)
+        _stage(db, "latest-fresh", host, lane="live",
+               timestamp=CLOCK-80)
+    assert process_next_batch(engine, shards=[2], max_chunks=1)
+    with transaction(engine) as db:
+        proc = db.scalar(select(Process).where(Process.host_id.is_not(None)))
+        assert proc is not None
+        assert proc.metadata_json["reference"]["historical_reference_incomplete"] is True
+        assert any("catch-up is incomplete" in w for w in
+                   proc.metadata_json["warnings"])

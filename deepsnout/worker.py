@@ -489,6 +489,11 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                             **active_tail, "active": False, "merged_at": now(),
                             "checkpoint": source.checkpoint})
                         result["live_tail_merged"] = True
+                        for stale in db.scalars(select(Job).where(
+                                Job.source_id == source.id, Job.kind == "tail_poll",
+                                Job.status == "queued")).all():
+                            stale.status, stale.finished, stale.error = (
+                                "cancelled", now(), "Live-tail cursor merged into source")
                     if poll_tuning is not None:
                         set_state(db, _tuning_key(source.id), poll_tuning)
                 elif kind == "tail_poll":
@@ -682,6 +687,11 @@ def tick_ingest(engine, config, guard=lambda: None):
                     tail = {**tail, "active": False,
                             "checkpoint": source.checkpoint, "merged_at": now()}
                     set_state(db, state_key, tail)
+                    for stale in db.scalars(select(Job).where(
+                            Job.source_id == source.id, Job.kind == "tail_poll",
+                            Job.status == "queued")).all():
+                        stale.status, stale.finished, stale.error = (
+                            "cancelled", now(), "Live-tail cursor merged into source")
                     current = source.checkpoint
 
                 if tail.get("active"):
