@@ -121,7 +121,8 @@ def test_failed_chunk_is_atomic_and_resume_does_not_repeat_finished_chunk(engine
         assert batch.compressed_events is not None
         assert count(db, Seen) == 1
         assert count(db, Coverage) == 1
-        assert not queue_has_room(db)
+        # Analytics failure must NOT stop neutral collection when storage is safe.
+        assert queue_has_room(db)
         retry_failed_batch(db, "partial")
     monkeypatch.setattr(worker, "ingest_age_partitioned", original)
     assert process_next_batch(engine, chunk_limit=1)

@@ -358,9 +358,10 @@ def initialize(engine):
         with sessionmaker(engine).begin() as db:
             version = db.get(State, "schema_version")
             if not version or version.value != SCHEMA_VERSION:
+                migration = "migrate-v2" if version and version.value == 1 else "migrate-v3"
                 raise RuntimeError(
                     "Database schema upgrade required. Back up PostgreSQL and secrets, "
-                    "stop all workers, then run 'deepsnout migrate-v3'.")
+                    "stop all workers, then run 'deepsnout " + migration + "'.")
     Base.metadata.create_all(engine)
     with sessionmaker(engine).begin() as db:
         if not db.get(State, "schema_version"):
