@@ -50,6 +50,7 @@
     <dt>Batch ID</dt><dd><code>{{ batch.id }}</code></dd>
     <dt>Parent collection ID</dt><dd><code>{{ batch.batch_parent }}</code></dd>
     <dt>Source</dt><dd>{{ source_name }}</dd>
+    <dt>Source ID</dt><dd><code>{{ batch.source_id or 'Not available' }}</code></dd>
     <dt>Collection committed (UTC)</dt><dd>{{ batch.collected_at|utc }}</dd>
     <dt>Captured analysis clock (UTC)</dt><dd>{{ batch.ingestion_clock|utc }}</dd>
     <dt>Analysis completed (UTC)</dt><dd>{{ batch.finished|utc if batch.finished else 'Not yet' }}</dd>
