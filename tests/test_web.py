@@ -484,7 +484,7 @@ def test_operations_show_three_workers_and_safe_analysis_backlog(browser, engine
     assert "Detection · shards 1/3" in page.text
     assert "Insight worker" in page.text
     assert "1</strong>" in page.text
-    assert "Staged analysis batches" in page.text
+    assert "Recently collected analysis batches" in page.text
     response = browser.get("/api/pipeline/metrics")
     assert response.status_code == 200
     metrics = response.json()
