@@ -7,6 +7,7 @@ from collections import defaultdict
 import hashlib
 import json
 import logging
+import os
 import time
 import zlib
 
@@ -18,12 +19,13 @@ from .engine import evaluate_windows
 
 LOG = logging.getLogger("deepsnout.pipeline")
 SHARD_COUNT = 4  # Changing this needs an explicit resharding migration.
-MAX_STORE_BYTES = 8 * 1024**3
+MAX_STORE_BYTES = max(1, int(os.getenv("DEEPSNOUT_STORE_BUDGET_GIB", "4"))) * 1024**3
+CATCHUP_RESERVE_FRACTION = 0.75
 MAX_BATCH_EVENTS = 100_000
 MAX_COMPRESSED_BYTES = 64 * 1024**2
 MAX_DECOMPRESSED_BYTES = MAX_COMPRESSED_BYTES * 8
 ANALYSIS_CHUNK_EVENTS = 400
-STORE_RETAIN_DAYS = 2
+STORE_RETAIN_DAYS = max(1, min(7, int(os.getenv("DEEPSNOUT_STORE_RETENTION_DAYS", "2"))))
 ANALYSIS_STATES = ("pending", "failed")
 LANES = ("live", "backfill")
 
@@ -109,9 +111,14 @@ def stage_observations(db, records, *, batch_id, source_id, namespace, cohort,
         payloads.append((shard, ordered, compressed))
         total_bytes += len(compressed)
 
-    if queued_metrics(db)["stored_bytes"] + total_bytes > MAX_STORE_BYTES:
+    existing_bytes = queued_metrics(db)["stored_bytes"]
+    if existing_bytes + total_bytes > MAX_STORE_BYTES:
         raise BackpressureError(
             "Local observation store exceeded byte budget; Splunk checkpoint unchanged.")
+    if (lane == "backfill" and
+            existing_bytes + total_bytes > MAX_STORE_BYTES * CATCHUP_RESERVE_FRACTION):
+        raise BackpressureError(
+            "Catch-up storage reservation reached; live ingestion capacity protected.")
     for position, (shard, ordered, compressed) in enumerate(payloads):
         row_id = batch_id if position == 0 else digest("staged-shard", batch_id, shard)
         db.add(StagedBatch(

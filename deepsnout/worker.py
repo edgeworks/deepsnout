@@ -634,12 +634,17 @@ def _role_heartbeat(engine, role, stage, detail=None):
 
 def tick_ingest(engine, config, guard=lambda: None):
     """Live-tail always wins over catch-up, unless storage cannot commit safely."""
-    from .pipeline import queue_has_room, queued_metrics
+    from .pipeline import queue_has_room, queued_metrics, CATCHUP_RESERVE_FRACTION
     with transaction(engine) as db:
         can_poll = queue_has_room(db)
         backlog = queued_metrics(db)
+        can_catchup = (can_poll and backlog["stored_bytes"] <
+                       backlog["store_budget_bytes"] * CATCHUP_RESERVE_FRACTION)
+        collection_state = (
+            "storage-backpressure" if not can_poll else
+            "live-reserve" if not can_catchup else "idle")
         set_state(db, "worker_ingest", {
-            "heartbeat": now(), "state": "idle" if can_poll else "storage-backpressure",
+            "heartbeat": now(), "state": collection_state,
             "detail": backlog})
         if can_poll:
             for source in db.scalars(select(Source).where(
@@ -684,7 +689,7 @@ def tick_ingest(engine, config, guard=lambda: None):
                         set_state(db, state_key, tail)
                 catchup_limit = int(tail["start"]) if tail.get("active") else latest
                 catching_up = current < catchup_limit - settings.window
-                if (catching_up and not source.last_error or
+                if can_catchup and (catching_up and not source.last_error or
                         now() - source.last_poll >= settings.interval):
                     pending = db.scalar(select(func.count()).select_from(Job).where(
                         Job.status.in_(ACTIVE_JOB_STATUSES))) or 0
@@ -698,7 +703,7 @@ def tick_ingest(engine, config, guard=lambda: None):
         test_job = next((j for j in queued if j.kind == "test"), None)
         tail_job = next((j for j in queued if j.kind == "tail_poll"), None)
         job = test_job or (tail_job if can_poll else None)
-        if not job and can_poll:
+        if not job and can_catchup:
             job = next((j for j in queued if j.kind == "poll"), None)
     if not job:
         return False
