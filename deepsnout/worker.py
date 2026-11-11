@@ -556,3 +556,172 @@ def run(engine, config):
                 LOG.exception("Worker tick failed")
                 busy = False
             time.sleep(1 if busy else 3)
+
+
+# v2 role-specific loops. Legacy run_job remains useful for local fixture and
+# import tests, but production poll jobs ONLY stage durable normalized batches.
+COLLECTION_JOB_KINDS = ("poll", "test")
+DETECTION_JOB_KINDS = ("import", "demo", "remove_demo", "maintenance")
+INSIGHT_JOB_KINDS = ("peer_groups", "finding_quality")
+
+
+def _role_heartbeat(engine, role, stage, detail=None):
+    with transaction(engine) as db:
+        set_state(db, "worker_" + role, {
+            "heartbeat": now(), "state": stage, "detail": detail or {}})
+
+
+def tick_ingest(engine, config, guard=lambda: None):
+    from .pipeline import queue_has_room, queued_metrics
+    with transaction(engine) as db:
+        _role = "worker_ingest"
+        can_poll = queue_has_room(db)
+        backlog = queued_metrics(db)
+        set_state(db, _role, {
+            "heartbeat": now(), "state": "idle" if can_poll else "backpressure",
+            "detail": backlog})
+        if can_poll:
+            for source in db.scalars(
+                    select(Source).where(Source.enabled.is_(True), Source.kind == "splunk")):
+                settings = SplunkSettings.model_validate(source.config)
+                catching_up = (source.checkpoint is not None and
+                               source.checkpoint < int(now()) - settings.lag - settings.window)
+                if (catching_up and not source.last_error or
+                        now() - source.last_poll >= settings.interval):
+                    pending = db.scalar(
+                        select(func.count()).select_from(Job)
+                        .where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0
+                    if pending >= 20:
+                        break
+                    enqueue(db, "poll", {"origin": "scheduler"}, source_id=source.id)
+                    source.last_poll = now()
+        queued = list(db.scalars(
+            select(Job).where(Job.status == "queued",
+                              Job.kind.in_(COLLECTION_JOB_KINDS))
+            .order_by(Job.created).limit(30)))
+        # A test operation does not consume the durable analysis queue.
+        job = next((j for j in queued if j.kind == "test"), None)
+        if not job and can_poll:
+            job = queued[0] if queued else None
+    if not job:
+        return False
+    return run_job(
+        engine, config, job.id, guard=guard,
+        defer_analysis=(job.kind == "poll"),
+        heartbeat_key="worker_ingest")
+
+
+def tick_analysis(engine, config, guard=lambda: None):
+    from .pipeline import next_pending_batch, process_next_batch, queued_metrics
+    _role_heartbeat(engine, "analysis", "idle")
+    with transaction(engine) as db:
+        batch = next_pending_batch(db)
+        if batch and batch.status == "failed":
+            set_state(db, "worker_analysis", {
+                "heartbeat": now(), "state": "blocked-on-failed-batch",
+                "detail": queued_metrics(db)})
+            return False
+        batch_id = batch.id if batch else None
+    if batch_id:
+        def report(stage, detail=None):
+            guard()
+            _role_heartbeat(engine, "analysis", stage, detail)
+        return process_next_batch(engine, progress=report)
+    with transaction(engine) as db:
+        job = db.scalar(
+            select(Job).where(Job.status == "queued",
+                              Job.kind.in_(DETECTION_JOB_KINDS))
+            .order_by(Job.created).limit(1))
+        job_id = job.id if job else None
+    if job_id:
+        return run_job(
+            engine, config, job_id, guard=guard,
+            heartbeat_key="worker_analysis")
+    with transaction(engine) as db:
+        evaluate_windows(db, limit=200)
+        last = db.get(State, "last_maintenance")
+        if not last or now() - last.value.get("at", 0) > 3600:
+            maintenance(db)
+            from .pipeline import prune_finished_batches
+            prune_finished_batches(db)
+    return False
+
+
+def tick_insight(engine, config, guard=lambda: None):
+    # Independent of source backlog. These jobs read committed historical
+    # summaries and findings; never handle live source cursors or raw batches.
+    _role_heartbeat(engine, "insight", "idle")
+    with transaction(engine) as db:
+        stamp = now()
+        peer_state = db.get(State, "peer_group_suggestions")
+        peer_updated = peer_state.value.get("updated_at", 0) if peer_state else 0
+        attempt = db.get(State, "peer_group_last_attempt")
+        peer_attempted = attempt.value.get("at", 0) if attempt else 0
+        if (db.scalar(select(func.count()).select_from(Host)) and
+                stamp - max(peer_updated, peer_attempted) >= 3600):
+            enqueue(db, "peer_groups", {"origin": "scheduler"})
+        quality_state = db.get(State, QUALITY_STATE_KEY)
+        quality_updated = quality_state.value.get("updated_at", 0) if quality_state else 0
+        quality_attempt = db.get(State, QUALITY_ATTEMPT_KEY)
+        quality_attempted = quality_attempt.value.get("at", 0) if quality_attempt else 0
+        if (db.scalar(select(func.count()).select_from(Finding)) and
+                stamp - max(quality_updated, quality_attempted) >= 3600):
+            enqueue(db, "finding_quality", {"origin": "scheduler"})
+        jobs = list(db.scalars(
+            select(Job).where(Job.status == "queued",
+                              Job.kind.in_(INSIGHT_JOB_KINDS))
+            .order_by(Job.created).limit(30)))
+        job = next((j for j in jobs
+                    if isinstance(j.payload, dict) and
+                    j.payload.get("origin") == "operator"), None)
+        job = job or (jobs[0] if jobs else None)
+    if not job:
+        return False
+    return run_job(
+        engine, config, job.id, guard=guard,
+        heartbeat_key="worker_insight")
+
+
+def run_role(engine, config, role):
+    if role not in ("ingest", "analysis", "insight"):
+        raise ValueError("Worker role must be ingest, analysis or insight")
+    role_kinds = {
+        "ingest": COLLECTION_JOB_KINDS,
+        "analysis": DETECTION_JOB_KINDS,
+        "insight": INSIGHT_JOB_KINDS,
+    }
+    runner = {
+        "ingest": tick_ingest,
+        "analysis": tick_analysis,
+        "insight": tick_insight,
+    }[role]
+    with worker_lock(engine, config, role=role) as guard:
+        LOG.info("DeepSnout %s worker started", role)
+        # Recover only jobs OWNED by this role. Never fail another active
+        # worker's jobs because this container restarted.
+        with transaction(engine) as db:
+            for job in db.scalars(
+                    select(Job).where(Job.kind.in_(role_kinds[role]),
+                                      Job.status.in_(("running", "cancel_requested")))):
+                job.status, job.finished, job.error = (
+                    "failed", now(),
+                    "Worker restarted during this job. Transactional writes rolled back.")
+                if job.kind == "peer_groups":
+                    set_state(db, "peer_group_last_attempt", {
+                        "at": now(), "job_id": job.id, "recovered": True})
+                if job.kind == "finding_quality":
+                    set_state(db, QUALITY_ATTEMPT_KEY, {
+                        "at": now(), "job_id": job.id, "recovered": True})
+                if role == "ingest" and job.source_id:
+                    source = db.get(Source, job.source_id)
+                    if source:
+                        source.last_error = job.error
+                audit(db, "worker-" + role, "job.interrupted", job.id, job.kind)
+        while True:
+            guard()
+            try:
+                busy = runner(engine, config, guard=guard)
+            except Exception:
+                LOG.exception("%s worker tick failed", role)
+                busy = False
+            time.sleep(1 if busy else 3)
