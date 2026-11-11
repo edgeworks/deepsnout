@@ -11,6 +11,7 @@ import time
 import zlib
 
 from sqlalchemy import select, func, delete
+from sqlalchemy.orm import defer
 from .db import StagedBatch, now, transaction, set_state
 from .normalize import Event, digest
 from .engine import evaluate_windows
@@ -173,7 +174,9 @@ def next_pending_batch(db, shards=None):
                     break
     if not choices:
         return None
-    return db.get(StagedBatch, min(choices)[2])
+    return db.get(
+        StagedBatch, min(choices)[2],
+        options=(defer(StagedBatch.compressed_events),))
 
 
 def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVENTS,
@@ -188,9 +191,14 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
             "id": batch.id, "event_count": batch.event_count,
             "namespace": batch.namespace, "cohort": batch.cohort,
             "clock": batch.ingestion_clock, "lane": batch.lane,
-            "shard": batch.shard, "compressed_events": batch.compressed_events,
-            "content_sha256": batch.content_sha256,
+            "shard": batch.shard, "content_sha256": batch.content_sha256,
         }
+        # The compressed payload is large: read it only on a cache miss,
+        # never during the 400-event transaction that advances a cursor.
+        hit = cache.get(batch_id) if cache is not None else None
+        if not hit or hit[0] != batch.content_sha256:
+            snapshot["compressed_events"] = db.scalar(
+                select(StagedBatch.compressed_events).where(StagedBatch.id == batch_id))
     try:
         cached = cache.get(batch_id) if cache is not None else None
         if cached and cached[0] == snapshot["content_sha256"]:
@@ -210,7 +218,9 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
                     "processed": start, "total": len(events),
                     "shard": snapshot["shard"], "lane": snapshot["lane"]})
             with transaction(engine) as db:
-                batch = db.get(StagedBatch, batch_id)
+                batch = db.get(
+                    StagedBatch, batch_id,
+                    options=(defer(StagedBatch.compressed_events),))
                 if batch.status != "pending" or batch.processed != start:
                     raise RuntimeError("Analysis cursor changed by another writer")
                 from .worker import ingest_age_partitioned
