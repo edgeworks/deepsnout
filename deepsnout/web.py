@@ -17,12 +17,13 @@ from . import __version__
 from .config import Config, Policy
 from .db import (make_engine, initialize, transaction, User, LoginSession, Source,
                  Job, Host, Coverage, BehaviorDay, Finding, Expectation, Audit,
-                 State, Seen, Process, Window, policy, now, set_state, audit)
+                 State, Seen, Process, Window, StagedBatch, policy, now, set_state, audit)
 from .security import (initialize_secrets, csrf_token, check_csrf, token_hash,
                        PASSWORDS, check_password, validate_password, crypto)
 from .normalize import parse_payload, digest
 from .splunk import SplunkSettings, validate_url
 from .worker import enqueue
+from .pipeline import queued_metrics, retry_failed_batch
 from .engine import EXPECTABLE
 from .finding_table import finding_csv, finding_table_row
 from .finding_quality import finding_quality_state, metrics_from_snapshot
@@ -791,6 +792,33 @@ def create_app(config=None):
             audit(db,user.username,"job.cancel_requested",job_id,job.kind)
         return RedirectResponse("/operations",303)
 
+
+    @app.get("/api/pipeline/metrics")
+    def pipeline_metrics(request: Request):
+        with transaction(engine) as db:
+            login_user(request, db)
+            metrics = queued_metrics(db)
+            workers = {}
+            for role in ("ingest", "analysis", "insight"):
+                state = db.get(State, "worker_" + role)
+                value = state.value if state else {}
+                workers[role] = {
+                    "last_heartbeat": value.get("heartbeat"),
+                    "state": value.get("state"),
+                }
+            metrics["workers"] = workers
+            metrics["raw_observation_names_included"] = False
+            return JSONResponse(metrics)
+
+    @app.post("/analysis/batches/{batch_id}/retry")
+    async def retry_analysis_batch(request: Request, batch_id: str):
+        await form_data(request)
+        with transaction(engine) as db:
+            user = login_user(request, db, {"admin"})
+            retry_failed_batch(db, batch_id)
+            audit(db, user.username, "analysis.batch.retry", batch_id)
+        return RedirectResponse("/operations", 303)
+
     @app.get("/operations")
     def operations(request: Request):
         with transaction(engine) as db:
@@ -802,7 +830,23 @@ def create_app(config=None):
             jobs=db.scalars(select(Job).order_by(Job.created.desc()).limit(40)).all()
             source_names={row.id:row.name for row in db.scalars(select(Source)).all()}
             logs=db.scalars(select(Audit).order_by(Audit.created.desc()).limit(60)).all()
-            return view(request,"operations.html",user=user,states=states,counts=counts,jobs=jobs,logs=logs,orphan=orphan,psl=psl_available(),source_names=source_names)
+            pipeline=queued_metrics(db)
+            staged=db.execute(
+                select(StagedBatch.id, StagedBatch.status, StagedBatch.event_count,
+                       StagedBatch.processed, StagedBatch.collected_at,
+                       StagedBatch.last_error, StagedBatch.finished)
+                .order_by(StagedBatch.collected_at.desc()).limit(15)).all()
+            collection_lags=[
+                max(0, int(now())-source.checkpoint)
+                for source in db.scalars(select(Source).where(
+                    Source.enabled.is_(True), Source.checkpoint.is_not(None)))
+            ]
+            return view(
+                request,"operations.html",user=user,states=states,
+                counts=counts,jobs=jobs,logs=logs,orphan=orphan,
+                psl=psl_available(),source_names=source_names,
+                pipeline=pipeline, staged_batches=staged,
+                collection_lag_seconds=max(collection_lags) if collection_lags else None)
 
     @app.get("/settings")
     def settings_page(request: Request):
