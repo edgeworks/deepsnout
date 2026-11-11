@@ -466,3 +466,52 @@ def test_finding_quality_requires_session_and_write_role(engine, config, browser
                 password="Quality viewer safe test passphrase").status_code == 303
     assert browser.get("/finding-quality").status_code == 200
     assert post(browser, "/finding-quality/refresh").status_code == 403
+
+
+
+def test_operations_show_three_workers_and_safe_analysis_backlog(browser, engine):
+    from deepsnout.pipeline import stage_observations
+    from conftest import evt, CLOCK
+    with transaction(engine) as db:
+        stage_observations(
+            db, [evt(n=71234)], batch_id="synthetic-ui-batch",
+            source_id="test-source", namespace="test",
+            cohort="unassigned", collected_clock=CLOCK)
+    page = browser.get("/operations")
+    assert page.status_code == 200
+    assert "Ingest worker" in page.text
+    assert "Detection worker" in page.text
+    assert "Insight worker" in page.text
+    assert "1</strong>" in page.text
+    assert "Staged analysis batches" in page.text
+    response = browser.get("/api/pipeline/metrics")
+    assert response.status_code == 200
+    metrics = response.json()
+    assert metrics["pending_batches"] == 1
+    assert metrics["pending_events"] == 1
+    assert metrics["raw_observation_names_included"] is False
+    assert "workstation.example" not in response.text
+    assert "utility.exe" not in response.text
+    assert set(metrics["workers"]) == {"ingest", "analysis", "insight"}
+
+
+def test_failed_batch_retry_requires_admin_and_preserves_cursor(browser, engine):
+    from deepsnout.pipeline import stage_observations
+    from deepsnout.db import StagedBatch
+    from conftest import evt, CLOCK
+    with transaction(engine) as db:
+        stage_observations(
+            db, [evt(n=71235)], batch_id="synthetic-retry-ui",
+            source_id="test-source", namespace="test",
+            cohort="unassigned", collected_clock=CLOCK)
+        db.flush()
+        staged = db.get(StagedBatch, "synthetic-retry-ui")
+        staged.status = "failed"
+        staged.last_error = "Synthetic test interruption"
+    result = post(browser, "/analysis/batches/synthetic-retry-ui/retry")
+    assert result.status_code == 303
+    with transaction(engine) as db:
+        staged = db.get(StagedBatch, "synthetic-retry-ui")
+        assert staged.status == "pending" and staged.processed == 0
+        assert staged.compressed_events is not None
+    assert post(browser, "/analysis/batches/synthetic-retry-ui/retry").status_code == 400
