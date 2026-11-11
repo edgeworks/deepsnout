@@ -186,6 +186,44 @@ def next_pending_batch(db, shards=None):
         options=(defer(StagedBatch.compressed_events),))
 
 
+
+# Structured operational diagnostics contain NO raw log lines, exception
+# messages, SQL queries/parameters, hostnames or command-line content.
+# Full tracebacks stay in the local container logs.
+def _safe_failure(exc, stage, batch, position):
+    root = getattr(exc, "orig", None) or exc
+    state = getattr(root, "sqlstate", None) or getattr(root, "pgcode", None)
+    if not (isinstance(state, str) and len(state) == 5 and
+            state.isascii() and state.isalnum()):
+        state = None
+    cls = type(exc).__name__
+    if state in ("40001", "40P01", "55P03"):
+        hint = "Database transaction contention. Review local worker and database logs before retry."
+    elif state in ("53100", "53200", "53400"):
+        hint = "Database resource limit reported. Verify free disk space and PostgreSQL capacity before retry."
+    elif state and state.startswith("23"):
+        hint = "Database constraint rejected an analysis write. Review local logs before retry."
+    elif stage == "decode":
+        hint = "Staged payload validation failed. Check integrity and local worker logs before retry."
+    elif stage == "evaluate-network":
+        hint = "Network-window evaluation failed. Review the detector-worker logs before retry."
+    elif stage == "ingest-chunk":
+        hint = "Event processing failed. Review the detector-worker logs before retry."
+    else:
+        hint = "The analysis transaction failed. Review local worker logs before retry."
+    return {
+        "occurred_at": now(),
+        "exception_type": cls,
+        "database_sqlstate": state,
+        "stage": stage,
+        "cursor_before_failure": position,
+        "lane": batch.lane,
+        "shard": batch.shard,
+        "hint": hint,
+        "message_redacted": True,
+    }
+
+
 def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVENTS,
                        max_chunks=None, shards=None, cache=None):
     """Commit each chunk and its cursor together; preempt background every chunk."""
@@ -216,6 +254,8 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
         if not hit or hit[0] != batch.content_sha256:
             snapshot["compressed_events"] = db.scalar(
                 select(StagedBatch.compressed_events).where(StagedBatch.id == batch_id))
+    stage = "decode"
+    chunk_start = offset
     try:
         cached = cache.get(batch_id) if cache is not None else None
         if cached and cached[0] == snapshot["content_sha256"]:
@@ -230,6 +270,8 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
         completed = 0
         for start in range(offset, len(events), chunk_limit):
             end = min(len(events), start + chunk_limit)
+            chunk_start = start
+            stage = "ingest-chunk"
             if progress:
                 progress("analysis-chunk", {
                     "processed": start, "total": len(events),
@@ -256,6 +298,7 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
                                          float(report.get(field, 0)), 3)
                 batch.processed = end
                 if end == len(events):
+                    stage = "evaluate-network"
                     t0 = time.monotonic()
                     affected = {digest(batch.namespace, e.host)[:32] for e in events}
                     stats["network_findings_created"] = evaluate_windows(
@@ -276,13 +319,26 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
                  snapshot["shard"], batch_id[:12], completed)
         return completed > 0
     except Exception as exc:
-        LOG.exception("Analysis batch failed; committed chunks retained")
+        # Include the stable batch ID in the local traceback so the GUI can
+        # point to the exact log entry. Do not put traceback/SQL/log content in
+        # the database, HTML or the counts-only metrics endpoint.
+        LOG.exception(
+            "Analysis batch failed batch=%s lane=%s shard=%s stage=%s offset=%s; committed chunks retained",
+            batch_id, snapshot["lane"], snapshot["shard"], stage, chunk_start)
         with transaction(engine) as db:
             batch = db.get(StagedBatch, batch_id)
             if batch and batch.status == "pending":
+                failure = _safe_failure(exc, stage, batch, chunk_start)
+                stats = dict(batch.stats or {})
+                stats["last_failure"] = failure
+                batch.stats = stats
                 batch.status = "failed"
                 batch.attempts += 1
-                batch.last_error = type(exc).__name__ + ": inspect local worker logs"
+                batch.last_error = (
+                    failure["exception_type"] +
+                    (" (SQLSTATE " + failure["database_sqlstate"] + ")"
+                     if failure["database_sqlstate"] else "") +
+                    " at " + failure["stage"])
                 set_state(db, "analysis_cursor:" + str(batch.shard), {
                     "batch_id": batch_id, "processed": batch.processed,
                     "total": batch.event_count, "at": now(), "status": "failed",
@@ -298,6 +354,9 @@ def retry_failed_batch(db, batch_id):
     if batch.compressed_events is None:
         raise ValueError("Missing retained payload; cannot retry")
     batch.status, batch.last_error = "pending", ""
+    stats = dict(batch.stats or {})
+    stats["last_retry_at"] = now()
+    batch.stats = stats
 
 
 def prune_finished_batches(db, clock=None):
