@@ -27,8 +27,8 @@ clock is retained for the 24-hour live finding eligibility cutoff,
 independently of queue delay, and event-time order is preserved inside
 every batch. The final chunk evaluates network windows after the entire
 batch has been ingested. Finished payload bytes are discarded immediately,
-with compact status retained for seven days. A digest and decompression
-bound protect staged-batch integrity. The queue contains NORMALIZED
+with compact status retained for seven days. A digest and compressed AND uncompressed size bounds protect
+staged-batch integrity. The queue contains NORMALIZED
 observations including security-sensitive image paths/metadata;
 it stays on premises and must be protected and backed up as part of DB.
 

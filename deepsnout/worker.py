@@ -620,6 +620,16 @@ def tick_analysis(engine, config, guard=lambda: None):
             set_state(db, "worker_analysis", {
                 "heartbeat": now(), "state": "blocked-on-failed-batch",
                 "detail": queued_metrics(db)})
+            # An explicit retention job can still run to recover from receipt
+            # capacity exhaustion; it never skips or analyzes later batches.
+            maintenance_job = db.scalar(
+                select(Job).where(Job.status == "queued",
+                                  Job.kind == "maintenance")
+                .order_by(Job.created).limit(1))
+            job_id = maintenance_job.id if maintenance_job else None
+            if job_id:
+                return run_job(engine, config, job_id, guard=guard,
+                               heartbeat_key="worker_analysis")
             return False
         batch_id = batch.id if batch else None
     if batch_id:

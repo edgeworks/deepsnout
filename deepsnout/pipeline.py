@@ -91,6 +91,9 @@ def stage_observations(db, records, *, batch_id, source_id, namespace, cohort,
     ordered = sorted(records, key=lambda e: (e.ts, e.event_id != 1))
     raw = json.dumps([e.to_dict() for e in ordered], separators=(",", ":"),
                      ensure_ascii=False).encode("utf-8")
+    if len(raw) > MAX_COMPRESSED_BYTES * 8:
+        raise BackpressureError(
+            "Normalized analysis batch exceeds 512 MiB uncompressed; cursor unchanged")
     compressed = zlib.compress(raw, level=3)
     if len(compressed) > MAX_COMPRESSED_BYTES:
         raise BackpressureError("Compressed analysis batch exceeds 64 MiB; cursor unchanged")

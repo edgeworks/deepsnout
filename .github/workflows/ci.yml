@@ -62,6 +62,20 @@ jobs:
             DEEPSNOUT_SMOKE_URL=https://localhost \
             DEEPSNOUT_SMOKE_CA=/tmp/deepsnout-local-ca.crt \
             python tools/compose_smoke.py
+      - name: Verify all three role-specific worker heartbeats
+        run: |
+          for i in $(seq 1 45); do
+            if docker compose exec -T ingest-worker deepsnout worker-health --role ingest \
+              && docker compose exec -T analysis-worker deepsnout worker-health --role analysis \
+              && docker compose exec -T insight-worker deepsnout worker-health --role insight; then
+              break
+            fi
+            sleep 2
+          done
+          docker compose exec -T ingest-worker deepsnout worker-health --role ingest
+          docker compose exec -T analysis-worker deepsnout worker-health --role analysis
+          docker compose exec -T insight-worker deepsnout worker-health --role insight
+          docker compose ps
       - name: Reject Caddyfile-injection-shaped public host
         run: |
           if docker run --rm -e 'DEEPSNOUT_PUBLIC_HOST=bad host { }' deepsnout-caddy:local; then
