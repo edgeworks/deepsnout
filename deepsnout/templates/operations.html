@@ -12,7 +12,7 @@
   </form>
 </header>
 <div class="stats">
-  {% for role,label in [('ingest','Ingest worker'),('analysis','Detection worker'),('insight','Insight worker')] %}
+  {% for role,label in [('ingest','Ingest worker'),('analysis_0_2','Detection · shards 0/2'),('analysis_1_3','Detection · shards 1/3'),('insight','Insight worker')] %}
   {% set status=states.get('worker_'+role,{}) %}
   {% set heartbeat=status.get('heartbeat',0) %}
   <div>
@@ -28,23 +28,26 @@
 <section class="panel">
   <h2>Independent progress</h2>
   <div class="stats">
-    <div><span>Splunk collection lag</span><strong>{{ '%.1f h'|format(collection_lag_seconds/3600) if collection_lag_seconds is not none else 'Unknown' }}</strong><small>Oldest enabled-source index-time checkpoint</small></div>
-    <div><span>Pending analysis</span><strong>{{ '{:,}'.format(pipeline.pending_events) }}</strong><small>{{ pipeline.pending_batches }} staged batches; maximum {{ '{:,}'.format(pipeline.queue_cap_events) }} events</small></div>
+    <div><span>Live collection lag</span><strong>{{ '%.1f min'|format(live_collection_lag_seconds/60) if live_collection_lag_seconds is not none else 'Unknown' }}</strong><small>Most recent indexed observations; source lag included</small></div>
+    <div><span>Historical catch-up lag</span><strong>{{ '%.1f h'|format(collection_lag_seconds/3600) if collection_lag_seconds is not none else 'Unknown' }}</strong><small>Oldest source index-time checkpoint</small></div>
+    <div><span>Pending analysis</span><strong>{{ '{:,}'.format(pipeline.pending_events) }}</strong><small>{{ pipeline.pending_batches }} batches · live {{ '{:,}'.format(pipeline.lanes.live.pending_events) }} · background {{ '{:,}'.format(pipeline.lanes.backfill.pending_events) }}</small></div>
     <div><span>Oldest analysis batch</span><strong>{{ '%.1f h'|format(pipeline.oldest_batch_age_seconds/3600) if pipeline.pending_batches else 'None' }}</strong><small>Time since collection, not event time</small></div>
-    <div><span>Failed analysis batches</span><strong class="{{ 'warn-text' if pipeline.failed_batches else 'good-text' }}">{{ pipeline.failed_batches }}</strong><small>Blocks later batches and new source checkpoints until repaired</small></div>
+    <div><span>Failed analysis batches</span><strong class="{{ 'warn-text' if pipeline.failed_batches else 'good-text' }}">{{ pipeline.failed_batches }}</strong><small>Only affected analysis lane/shard stops; collection continues</small></div>
+    <div><span>Retained observation storage</span><strong>{{ '%.2f GiB'|format(pipeline.stored_bytes/1073741824) }}</strong><small>Budget {{ '%.1f GiB'|format(pipeline.store_budget_bytes/1073741824) }} · {{ pipeline.store_retention_days }} days after analysis; not a disk-free measurement</small></div>
   </div>
-  <p class="muted">Ingest writes a compressed local observation batch and its Splunk checkpoint together. Detection consumes that batch in 400-event transactions with its own cursor. A failed chunk can be retried without retrieving data from Splunk.</p>
-  <details><summary>Last committed analysis cursor</summary><pre>{{ states.get('analysis_cursor',{})|pretty }}</pre></details>
+  <p class="muted">Live ingestion stays prioritized over historical catch-up. Collection atomically stores all host shards with its index-time cursor. Two detection workers analyze disjoint host partitions, giving live work priority between 400-event chunks. Analysis failures do not block collection unless the protected observation-store byte budget is reached.</p>
+  <details><summary>Last committed analysis cursors</summary><pre>{{ {'0':states.get('analysis_cursor:0',{}),'1':states.get('analysis_cursor:1',{}),'2':states.get('analysis_cursor:2',{}),'3':states.get('analysis_cursor:3',{})}|pretty }}</pre></details>
   <p class="muted"><a href="/api/pipeline/metrics">Counts-only pipeline status (authenticated)</a>. No raw observations are included.</p>
 </section>
 <section class="panel table-scroll">
   <h2>Staged analysis batches</h2>
   <table>
-    <thead><tr><th>Collected (UTC)</th><th>Status</th><th>Analyzed / total</th><th>Age</th><th>Error</th><th>Action</th></tr></thead>
+    <thead><tr><th>Collected (UTC)</th><th>Lane</th><th>Host shard</th><th>Status</th><th>Analyzed / total</th><th>Age</th><th>Error</th><th>Action</th></tr></thead>
     <tbody>
       {% for b in staged_batches %}
       <tr>
         <td>{{ b.collected_at|utc }}</td>
+        <td>{{ b.lane }}</td><td>{{ b.shard }}</td>
         <td>{{ b.status }}</td>
         <td>{{ '{:,}'.format(b.processed) }} / {{ '{:,}'.format(b.event_count) }}</td>
         <td>{{ '%.1f min'|format((now-b.collected_at)/60) }}</td>
@@ -56,7 +59,7 @@
           </form>
         {% else %}—{% endif %}</td>
       </tr>
-      {% else %}<tr><td colspan="6">No staged batches yet.</td></tr>{% endfor %}
+      {% else %}<tr><td colspan="8">No staged batches yet.</td></tr>{% endfor %}
     </tbody>
   </table>
 </section>
@@ -68,9 +71,9 @@
     {% endfor %}
     <span><strong>{{ '{:,}'.format(orphan or 0) }}</strong>Processes awaiting Event 1</span>
   </div>
-  <p class="muted">The receipt ledger stores fingerprints. Staged compressed normalized events remain entirely in PostgreSQL until analyzed and are discarded on successful completion. A bounded queue protects disk capacity.</p>
+  <p class="muted">The receipt ledger stores fingerprints. Compressed normalized events, including sensitive paths, remain in the on-premises database during analysis and for two days afterward. They are never exported. Store budget controls the size of this particular table, not the whole PostgreSQL disk.</p>
   <details><summary>Latest analysis and retention report</summary>
-    <pre>{{ {'analysis':states.get('last_ingest',{}),'retention':states.get('last_maintenance',{})}|pretty }}</pre>
+    <pre>{{ {'analysis_shard_0':states.get('last_ingest:0',{}),'analysis_shard_1':states.get('last_ingest:1',{}),'analysis_shard_2':states.get('last_ingest:2',{}),'analysis_shard_3':states.get('last_ingest:3',{}),'retention':states.get('last_maintenance',{})}|pretty }}</pre>
   </details>
 </section>
 <section class="panel table-scroll">
