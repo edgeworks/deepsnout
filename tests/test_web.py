@@ -517,3 +517,92 @@ def test_failed_batch_retry_requires_admin_and_preserves_cursor(browser, engine)
         assert staged.status == "pending" and staged.processed == 0
         assert staged.compressed_events is not None
     assert post(browser, "/analysis/batches/synthetic-retry-ui/retry").status_code == 400
+
+
+
+def test_old_failed_batch_surfaces_above_recent_batches_and_has_detail(browser, engine):
+    from conftest import evt, CLOCK
+    from deepsnout.pipeline import stage_observations
+    from deepsnout.db import StagedBatch
+    with transaction(engine) as db:
+        stage_observations(
+            db, [evt(n=71300)], batch_id="old-failed-batch",
+            source_id="synthetic-source", namespace="test",
+            cohort="unassigned", collected_clock=CLOCK)
+        db.flush()
+        oldest = db.get(StagedBatch, "old-failed-batch")
+        oldest.status = "failed"
+        oldest.attempts = 2
+        oldest.processed = 0
+        oldest.last_error = "IntegrityError (SQLSTATE 23505) at ingest-chunk"
+        oldest.stats = {
+            "last_failure": {
+                "stage": "ingest-chunk",
+                "exception_type": "IntegrityError",
+                "database_sqlstate": "23505",
+                "occurred_at": CLOCK,
+                "cursor_before_failure": 0,
+                "hint": "Database constraint rejected an analysis write.",
+                "message_redacted": True,
+            },
+            "secret_internal_log": "SECRET-HOST.example --password=PRIVATE",
+        }
+    # More than 15 newer records: the usual recent-batch table will omit
+    # the older failure, but the dedicated failure list must never do so.
+    for i in range(20):
+        with transaction(engine) as db:
+            stage_observations(
+                db, [evt(n=71400+i)], batch_id=f"recent-record-{i}",
+                source_id="synthetic-source", namespace="test",
+                cohort="unassigned", collected_clock=CLOCK+i)
+    page = browser.get("/operations")
+    assert page.status_code == 200
+    assert 'id="failed-analysis"' in page.text
+    assert "/analysis/batches/old-failed-batch" in page.text
+    assert "IntegrityError (SQLSTATE 23505)" in page.text
+    assert "Inspect failures" in page.text
+    details = browser.get("/analysis/batches/old-failed-batch")
+    assert details.status_code == 200
+    for expected in ("PostgreSQL SQLSTATE", "23505", "ingest-chunk",
+                     "Retry remaining", "synthetic-source", "2</strong>"):
+        assert expected in details.text
+    assert "SECRET-HOST" not in details.text
+    assert "PRIVATE" not in details.text
+    assert "compressed_events" not in details.text
+    assert browser.get("/analysis/batches/not-present").status_code == 404
+    assert browser.post(
+        "/analysis/batches/old-failed-batch/retry",
+        data={"csrf": "forged"}).status_code == 403
+    response = post(browser, "/analysis/batches/old-failed-batch/retry")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/analysis/batches/old-failed-batch"
+    with transaction(engine) as db:
+        batch = db.get(StagedBatch, "old-failed-batch")
+        assert batch.status == "pending"
+        assert batch.processed == 0
+        assert batch.stats["last_failure"]["database_sqlstate"] == "23505"
+        assert batch.stats["last_retry_at"] > 0
+    assert "Retry remaining" not in browser.get(
+        "/analysis/batches/old-failed-batch").text
+
+
+def test_batch_detail_requires_admin(browser, engine, config):
+    from fastapi.testclient import TestClient
+    from deepsnout.web import create_app
+    app = create_app(config)
+    with TestClient(app, follow_redirects=False) as guest:
+        assert guest.get("/analysis/batches/not-present").status_code == 303
+        assert guest.get("/operations").status_code == 303
+        assert guest.post("/analysis/batches/not-present/retry",
+                          data={}).status_code == 403
+    app.state.engine.dispose()
+    assert post(browser, "/accounts", username="batchviewer",
+                password="Viewer safe synthetic passphrase",
+                role="viewer").status_code == 303
+    assert post(browser, "/logout").status_code == 303
+    browser.get("/login")
+    assert post(browser, "/login", username="batchviewer",
+                password="Viewer safe synthetic passphrase").status_code == 303
+    assert browser.get("/analysis/batches/not-present").status_code == 403
+    assert browser.get("/operations").status_code == 403
+    assert post(browser, "/analysis/batches/not-present/retry").status_code == 403

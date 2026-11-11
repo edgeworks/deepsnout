@@ -112,7 +112,7 @@ def test_failed_chunk_is_atomic_and_resume_does_not_repeat_finished_chunk(engine
     def fail_second(*args, **kwargs):
         calls.append(1)
         if len(calls) == 2:
-            raise ValueError("synthetic chunk interruption")
+            raise ValueError("synthetic chunk interruption SECRET-HOST.example")
         return original(*args, **kwargs)
 
     monkeypatch.setattr(worker, "ingest_age_partitioned", fail_second)
@@ -122,11 +122,22 @@ def test_failed_chunk_is_atomic_and_resume_does_not_repeat_finished_chunk(engine
         assert batch.status == "failed"
         assert batch.processed == 1
         assert batch.compressed_events is not None
+        assert batch.last_error == "ValueError at ingest-chunk"
+        assert "SECRET-HOST" not in str(batch.stats)
+        assert "SECRET-HOST" not in batch.last_error
+        failure = batch.stats["last_failure"]
+        assert failure["stage"] == "ingest-chunk"
+        assert failure["cursor_before_failure"] == 1
+        assert failure["exception_type"] == "ValueError"
+        assert failure["message_redacted"] is True
+        assert failure["database_sqlstate"] is None
         assert count(db, Seen) == 1
         assert count(db, Coverage) == 1
         # Analytics failure must NOT stop neutral collection when storage is safe.
         assert queue_has_room(db)
         retry_failed_batch(db, "partial")
+        assert batch.stats["last_failure"]["stage"] == "ingest-chunk"
+        assert batch.stats["last_retry_at"] > 0
     monkeypatch.setattr(worker, "ingest_age_partitioned", original)
     assert process_next_batch(engine, chunk_limit=1)
     with transaction(engine) as db:
@@ -186,6 +197,8 @@ def test_deduplicated_staging_and_corrupt_payload_fail_closed(engine):
     with transaction(engine) as db:
         batch = db.get(StagedBatch, "repeat")
         assert batch.status == "failed" and batch.processed == 0
+        assert batch.stats["last_failure"]["stage"] == "decode"
+        assert batch.stats["last_failure"]["message_redacted"] is True
         assert count(db, Seen) == 0
 
 
@@ -271,3 +284,28 @@ def test_finished_batch_retention_never_removes_pending_data(db):
     assert prune_finished_batches(db) == 1
     assert db.get(StagedBatch, "pending") is not None
     assert db.get(StagedBatch, "done") is None
+
+
+
+def test_failure_diagnostic_exposes_sqlstate_not_sensitive_exception_text():
+    from types import SimpleNamespace
+    from deepsnout.pipeline import _safe_failure
+
+    class SyntheticPgError(Exception):
+        sqlstate = "23505"
+
+    class SyntheticDbFailure(Exception):
+        def __init__(self):
+            super().__init__("SELECT secret FROM confidential WHERE host='SECRET-HOST'")
+            self.orig = SyntheticPgError("source path: PRIVATE-FILE")
+
+    batch = SimpleNamespace(lane="backfill", shard=2)
+    diagnostic = _safe_failure(
+        SyntheticDbFailure(), "ingest-chunk", batch, 17)
+    assert diagnostic["database_sqlstate"] == "23505"
+    assert diagnostic["exception_type"] == "SyntheticDbFailure"
+    assert diagnostic["cursor_before_failure"] == 17
+    assert "constraint" in diagnostic["hint"].lower()
+    assert "SECRET-HOST" not in str(diagnostic)
+    assert "PRIVATE-FILE" not in str(diagnostic)
+    assert "SELECT" not in str(diagnostic)
