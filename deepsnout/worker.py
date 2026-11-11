@@ -695,52 +695,60 @@ def tick_ingest(engine, config, guard=lambda: None):
         heartbeat_key="worker_ingest")
 
 
-def tick_analysis(engine, config, guard=lambda: None):
+def tick_analysis(engine, config, guard=lambda: None, shards=None, cache=None):
+    """Host-sharded detector lanes; one bounded chunk per loop iteration."""
     from .pipeline import next_pending_batch, process_next_batch, queued_metrics
-    _role_heartbeat(engine, "analysis", "idle")
+    shards = tuple(range(4)) if shards is None else tuple(shards)
+    role_name = "analysis_" + "_".join(map(str, shards))
+    _role_heartbeat(engine, role_name, "idle")
+    primary = 0 in shards
+    manual_job = None
+    if primary:
+        with transaction(engine) as db:
+            urgent = db.scalar(select(Job).where(
+                Job.status == "queued", Job.kind.in_(DETECTION_JOB_KINDS),
+                Job.payload["origin"].as_string() == "operator"
+            ).order_by(Job.created).limit(1))
+            manual_job = urgent.id if urgent else None
+    if manual_job:
+        return run_job(engine, config, manual_job, guard=guard,
+                       heartbeat_key="worker_" + role_name)
+    # Retention runs even during ongoing analysis so its receipt ledger and
+    # completed observation-store data cannot grow without bound.
+    if primary:
+        with transaction(engine) as db:
+            last = db.get(State, "last_maintenance")
+            if not last or now() - last.value.get("at", 0) > 3600:
+                maintenance(db)
+                from .pipeline import prune_finished_batches
+                prune_finished_batches(db)
+
     with transaction(engine) as db:
-        batch = next_pending_batch(db)
-        blocked = bool(batch and batch.status == "failed")
-        maintenance_id = None
-        if blocked:
-            set_state(db, "worker_analysis", {
-                "heartbeat": now(), "state": "blocked-on-failed-batch",
-                "detail": queued_metrics(db)})
-            # An explicitly queued retention job can recover exhausted receipt
-            # capacity. Never run it in an open heartbeat transaction.
-            maintenance_job = db.scalar(
-                select(Job).where(Job.status == "queued",
-                                  Job.kind == "maintenance")
-                .order_by(Job.created).limit(1))
-            maintenance_id = maintenance_job.id if maintenance_job else None
-        batch_id = batch.id if batch and not blocked else None
-    if blocked:
-        if maintenance_id:
-            return run_job(engine, config, maintenance_id, guard=guard,
-                           heartbeat_key="worker_analysis")
-        return False
+        batch = next_pending_batch(db, shards=shards)
+        batch_id = batch.id if batch else None
+        snapshot = queued_metrics(db) if not batch_id else None
     if batch_id:
         def report(stage, detail=None):
             guard()
-            _role_heartbeat(engine, "analysis", stage, detail)
-        return process_next_batch(engine, progress=report)
+            _role_heartbeat(engine, role_name, stage, detail)
+        return process_next_batch(
+            engine, progress=report, max_chunks=1,
+            shards=shards, cache=cache)
+
+    if not primary:
+        return False
     with transaction(engine) as db:
-        job = db.scalar(
-            select(Job).where(Job.status == "queued",
-                              Job.kind.in_(DETECTION_JOB_KINDS))
+        job = db.scalar(select(Job).where(
+            Job.status == "queued", Job.kind.in_(DETECTION_JOB_KINDS))
             .order_by(Job.created).limit(1))
         job_id = job.id if job else None
     if job_id:
-        return run_job(
-            engine, config, job_id, guard=guard,
-            heartbeat_key="worker_analysis")
-    with transaction(engine) as db:
-        evaluate_windows(db, limit=200)
-        last = db.get(State, "last_maintenance")
-        if not last or now() - last.value.get("at", 0) > 3600:
-            maintenance(db)
-            from .pipeline import prune_finished_batches
-            prune_finished_batches(db)
+        return run_job(engine, config, job_id, guard=guard,
+                       heartbeat_key="worker_" + role_name)
+    # A global sweep is safe only after all staged analysis is caught up.
+    if snapshot and snapshot["pending_events"] == 0:
+        with transaction(engine) as db:
+            evaluate_windows(db, limit=200)
     return False
 
 
