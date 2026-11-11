@@ -1,6 +1,71 @@
-# Verification report - 0.1.0a25
+# Verification report - 0.1.0a26
 
-## Mixed-age Splunk ingestion fast path and progress (0.1.0a25)
+## Independent collection, detection and insight workers (0.1.0a26)
+
+This release replaces the monolithic Docker Compose `worker` service with
+three independently locked processes: `ingest-worker` (Splunk API collection
+and staging), `analysis-worker` (live/historical reference evaluation plus
+detectors and periodic maintenance) and `insight-worker` (peer group discovery
+and finding-quality self-diagnosis). There is no external broker, LLM,
+network export or additional server. All use the same local PostgreSQL.
+
+The durable boundary is a bounded new `staged_batches` PostgreSQL table
+(schema v2). The collector normalizes and orders source observations,
+compresses the structured events locally, and commits the batch in the
+**same transaction** as the Splunk index-time checkpoint and poll result.
+A completed collection job therefore means *durably staged*, not already
+analyzed. The source has no dependency on the analysis worker's transaction
+duration; the backpressure limit is 800K staged-but-not-yet-analyzed events
+or 80 batches. Failed analysis batches block later batches and new collection
+to preserve chronology. No source checkpoint advances on a failed stage.
+
+The detector worker processes staged batches in collection order, in
+bounded chunks (400 events), each transaction atomically committing
+the processed position, event receipts and any findings. On interruption
+it resumes at the last committed cursor. The original collection-time
+clock is retained for the 24-hour live finding eligibility cutoff,
+independently of queue delay, and event-time order is preserved inside
+every batch. The final chunk evaluates network windows after the entire
+batch has been ingested. Finished payload bytes are discarded immediately,
+with compact status retained for seven days. A digest and decompression
+bound protect staged-batch integrity. The queue contains NORMALIZED
+observations including security-sensitive image paths/metadata;
+it stays on premises and must be protected and backed up as part of DB.
+
+Ingestion performance was previously measured in production at 12,210
+seconds for 51,330 live observations, versus 7.4 seconds for 2,475
+historical observations in the same poll. This split prevents that
+live computation from blocking new collection until the bounded queue
+fills, but DOES NOT promise the live detector is intrinsically fast.
+Per-chunk preloading of Host, Coverage, Process, BehaviorDay and Window
+rows reduces redundant live SELECT calls. This improvement has only
+been verified on synthetic fixtures; actual throughput and backlog
+growth must be measured after deployment.
+
+The Operations screen displays three independent heartbeats, source
+checkpoint lag, analysis queue depth/age and failure/rollback progress.
+The counts-only authenticated `/api/pipeline/metrics` endpoint includes
+no event names. An administrator may retry a failed batch without
+re-polling Splunk. A failed older batch is never automatically skipped.
+
+**Migration required** for existing v1 DBs, after a PostgreSQL + app
+encryption-secrets backup and stopping the old `worker`. New schema v2
+is refused on v1 until an explicit `deepsnout migrate-v2`. The command
+creates only the staged batch table and updates the schema marker.
+The `--recover-interrupted` flag must be explicit to mark any orphaned
+running v1 jobs failed; this does not advance source checkpoints.
+No automatic data migration takes place at server startup. Downgrading
+requires restoring the coordinated DB/secrets backup.
+
+Synthetic SQLite/PostgreSQL regression tests cover explicit upgrade and
+idempotency, source checkpoint atomicity, queue capacity, payload
+integrity, out-of-order timestamps, independent analysis cursor,
+recovery from failed middle chunks, strict ordering across batches,
+original finding preservation, role-specific advisory locks and
+authenticated visibility/retry. Docker Compose smoke tests exercise
+fresh schema initialization and live service startup.
+
+## Mixed-age Splunk ingestion fast path (0.1.0a25)
 
 In the previous implementation, one Sysmon event younger than 24 hours
 made an entire Splunk index-time slice use live ingestion, including

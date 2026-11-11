@@ -176,6 +176,61 @@ Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
 
+## Independent worker roles and durable processing (v0.1.0a26)
+
+DeepSnout now runs three local, independently locked worker services:
+
+- **ingest-worker** collects read-only Splunk results, normalizes them,
+  and stages compressed observations with the index-time checkpoint
+  in one transaction. Source collection is no longer blocked by live
+  behavioral reference queries.
+- **analysis-worker** processes staged batches in 400-observation chunks
+  with its own durable cursor; interrupted chunks can be retried
+  without contacting Splunk. Full existing DS-* detection remains.
+- **insight-worker** runs peer-group learning and Finding quality
+  analysis independently of both other workers.
+
+Operations shows the three heartbeats, pending analysis events and age,
+and retry for failed analysis batches. A failed batch stops later
+analysis rather than skipping data; the local queue applies backpressure
+when it reaches 800,000 pending events or 80 batches. The authenticated
+`/api/pipeline/metrics` is counts-only.
+
+**Upgrade from v0.1.0a25 needs an explicit schema v1 to v2 migration.**
+After backing up PostgreSQL and the paired application secrets, stop
+the old worker before updating. The new init refuses v1 without the
+explicit migration; it does not modify existing schema automatically.
+Example sequence from the compose checkout:
+
+```bash
+docker compose stop worker
+git pull --ff-only
+docker compose build
+docker compose run --rm --no-deps init migrate-v2 --recover-interrupted
+docker compose up -d --no-build --remove-orphans
+docker compose exec -T analysis-worker deepsnout version
+docker compose ps
+```
+
+Use `--recover-interrupted` only after the original worker is stopped.
+It marks orphaned in-progress v1 jobs failed without moving the Splunk
+checkpoint. A normal `migrate-v2` without that flag refuses if unfinished
+old jobs remain. Only database backups coupled with encryption secrets
+make a reliable downgrade possible; do not attempt a database schema
+downgrade in place. New installations start directly on v2.
+
+**Storage/privacy note:** Staged batches contain normalized event details
+(including process image paths), not just counts; they stay in the
+on-premises PostgreSQL database, are capped, and their payload is
+discarded after successful processing. Protect the DB and its backup
+accordingly. This is not an outbound telemetry pipeline.
+
+**Performance note:** The three roles remove the collection bottleneck,
+but live detector calculations can still take hours for unusually large
+batches. The analysis worker now preloads existing observation rows per
+chunk; use Operations to measure actual improvement. The source can
+continue only until the bounded analysis backlog is full.
+
 ## Faster mixed-age polling (v0.1.0a25)
 
 DeepSnout's Splunk source may deliver events within one index-time

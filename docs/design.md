@@ -14,6 +14,36 @@ alternative. No broker, Redis, Node build chain, vector DB or externally loaded 
 A PostgreSQL session advisory lock prevents accidental parallel analysis writers;
 SQLite development uses flock. Normal GUI writes remain transactional.
 
+## Decoupled worker architecture (v0.1.0a26)
+
+Three worker roles share PostgreSQL but use different advisory locks and
+heartbeat state keys. Ingest alone possesses the source polling path.
+It atomically commits compact compressed normalized observation batches
+with source checkpoints. A separate detector worker consumes batches
+strictly in collection order, with at most 400 events in each analysis
+transaction and an independently persisted cursor; a crash rolls back
+the current chunk but not previous chunks or its source collection.
+A third independent insight worker runs peer groups and finding-quality
+jobs against committed history without waiting on detector transactions.
+There is no external data egress or hosted model dependency.
+
+Staged normalized events remain sensitive. The queue is bounded by event
+and batch counts; integrity digests and decompression bounds apply.
+After successful analysis the raw staged payload bytes are erased and
+compact completion metadata retained seven days. A failed earlier
+batch blocks later analysis and new collection until an operator
+retries it, never advancing the cursor by skipping. The 24-hour live
+detection horizon uses the stored collection-time clock, not the later
+analysis-time clock, protecting delayed processing. Distinct host/event
+time identities and ProcessGuid correlation remain unchanged.
+
+Any schema upgrade is explicit and backup-gated; version 1 cannot
+silently acquire the schema-v2 table. Operations shows independent
+collection and analysis lag, role status, and safe recovery controls.
+The live analysis remains CPU/DB-bound; chunked progress and row
+preloading improve observability and permit independent collection,
+but are not proof of production throughput.
+
 ## Collection and commit
 
 The worker retrieves a bounded Splunk index-time slice outside the transaction,
