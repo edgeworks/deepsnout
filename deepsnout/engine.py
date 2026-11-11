@@ -198,6 +198,36 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
 
     if on_progress:
         on_progress(0, len(events))
+    if not historical:
+        # Live-mode was doing multiple SELECTs for almost every observation,
+        # including repeated Host, Process, Coverage, BehaviorDay and Window
+        # lookups. Preload the already-existing rows once per bounded chunk.
+        # This does not precompute novelty references or change event order.
+        live_host_ids = {host_key(namespace, e.host) for e in events}
+        hosts.update(_preload_by_id(db, Host, live_host_ids))
+        coverage.update(_preload_by_id(db, Coverage, {
+            digest(host_key(namespace, e.host), int(e.ts) // DAY, e.event_id)
+            for e in events
+        }))
+        processes.update(_preload_by_id(db, Process, {
+            digest(host_key(namespace, e.host), e.guid)
+            for e in events if e.guid
+        }))
+        behaviors.update(_preload_by_id(db, BehaviorDay, {
+            digest(host_key(namespace, e.host), int(e.ts) // DAY, execution_context(e))
+            for e in events if e.event_id == 1
+        }))
+        window_ids = set()
+        for e in events:
+            if e.event_id == 3 and e.initiated is True and ipaddress.ip_address(e.destination).is_global:
+                start = int(e.ts) // WINDOW * WINDOW
+                window_ids.add(digest(host_key(namespace, e.host), e.app,
+                                      e.location, "ip", start))
+            elif e.event_id == 22 and "." in e.query:
+                start = int(e.ts) // WINDOW * WINDOW
+                window_ids.add(digest(host_key(namespace, e.host), e.app,
+                                      e.location, "domain", start))
+        windows.update(_preload_by_id(db, Window, window_ids))
     if historical:
         host_ids = {host_key(namespace, e.host) for e in events}
         hosts.update(_preload_by_id(db, Host, host_ids))
