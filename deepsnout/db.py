@@ -3,7 +3,8 @@ import time
 import uuid
 from contextlib import contextmanager
 from sqlalchemy import (create_engine, event, Column, String, Integer, BigInteger,
-                        Float, Boolean, JSON, Text, Index, ForeignKey, select)
+                        Float, Boolean, JSON, Text, Index, ForeignKey, LargeBinary, select,
+                        update, inspect)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from .config import Policy
 
@@ -69,6 +70,31 @@ class Job(Base):
     payload = Column(JSON, nullable=False, default=dict)
     report = Column(JSON, nullable=False, default=dict)
     error = Column(Text, nullable=False, default="")
+
+
+class StagedBatch(Base):
+    """Private, bounded and resumable normalized-observation handoff.
+
+    Collection commits this compressed batch with its Splunk cursor. Analysis
+    processes bounded chunks with a separate offset. Only finished batches
+    discard payload bytes; a failed batch remains available for explicit retry.
+    """
+    __tablename__ = "staged_batches"
+    id = Column(String(64), primary_key=True)
+    source_id = Column(String(32), nullable=True)
+    namespace = Column(String(80), nullable=False)
+    cohort = Column(String(80), nullable=False, default="unassigned")
+    collected_at = Column(Float, nullable=False)
+    ingestion_clock = Column(Float, nullable=False)
+    event_count = Column(Integer, nullable=False)
+    processed = Column(Integer, nullable=False, default=0)
+    compressed_events = Column(LargeBinary, nullable=True)
+    content_sha256 = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="pending")
+    last_error = Column(String(300), nullable=False, default="")
+    attempts = Column(Integer, nullable=False, default=0)
+    finished = Column(Float, nullable=False, default=0)
+    __table_args__ = (Index("ix_staged_batch_queue", "status", "collected_at"),)
 
 
 class Host(Base):
@@ -210,15 +236,47 @@ def make_engine(config):
     return engine
 
 
+SCHEMA_VERSION = 2
+
+
+def migrate_v2(engine):
+    """Explicit v1 -> v2 migration. Stop worker containers and back up first.
+
+    A separate transaction installs the new table and updates the schema
+    marker together. Re-running on v2 is safe. v1 sources/findings remain.
+    """
+    with engine.begin() as conn:
+        if not inspect(conn).has_table("state"):
+            raise RuntimeError("No existing database schema; run deepsnout init")
+        version = conn.execute(
+            select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
+        if version == SCHEMA_VERSION:
+            return "Schema is already v2"
+        if version != 1:
+            raise RuntimeError("Expected existing schema v1; refusing unknown version")
+        active = conn.execute(
+            select(Job.id).where(Job.status.in_(("running", "cancel_requested")))
+            .limit(1)).first()
+        if active:
+            raise RuntimeError("A running job exists. Stop the old worker and resolve it before migrating")
+        StagedBatch.__table__.create(conn, checkfirst=True)
+        conn.execute(update(State).where(State.key == "schema_version").values(value=SCHEMA_VERSION))
+    return "Migrated schema v1 to v2"
+
+
 def initialize(engine):
-    # Fresh schema v1 only. Unknown versions are refused, not silently upgraded.
+    # Check the deployed schema BEFORE creating new tables on an existing DB.
+    if inspect(engine).has_table("state"):
+        with sessionmaker(engine).begin() as db:
+            version = db.get(State, "schema_version")
+            if not version or version.value != SCHEMA_VERSION:
+                raise RuntimeError(
+                    "Database schema upgrade required. Back up PostgreSQL and secrets, "
+                    "stop the old worker, then run 'deepsnout migrate-v2'.")
     Base.metadata.create_all(engine)
     with sessionmaker(engine).begin() as db:
-        version = db.get(State, "schema_version")
-        if version and version.value != 1:
-            raise RuntimeError("Unsupported schema; run the documented migration first")
-        if not version:
-            db.add(State(key="schema_version", value=1))
+        if not db.get(State, "schema_version"):
+            db.add(State(key="schema_version", value=SCHEMA_VERSION))
         if not db.get(State, "policy"):
             db.add(State(key="policy", value=Policy().model_dump()))
 
