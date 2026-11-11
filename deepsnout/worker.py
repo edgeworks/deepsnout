@@ -620,42 +620,78 @@ def _role_heartbeat(engine, role, stage, detail=None):
 
 
 def tick_ingest(engine, config, guard=lambda: None):
+    """Live-tail always wins over catch-up, unless storage cannot commit safely."""
     from .pipeline import queue_has_room, queued_metrics
     with transaction(engine) as db:
-        _role = "worker_ingest"
         can_poll = queue_has_room(db)
         backlog = queued_metrics(db)
-        set_state(db, _role, {
-            "heartbeat": now(), "state": "idle" if can_poll else "backpressure",
+        set_state(db, "worker_ingest", {
+            "heartbeat": now(), "state": "idle" if can_poll else "storage-backpressure",
             "detail": backlog})
         if can_poll:
-            for source in db.scalars(
-                    select(Source).where(Source.enabled.is_(True), Source.kind == "splunk")):
+            for source in db.scalars(select(Source).where(
+                    Source.enabled.is_(True), Source.kind == "splunk")):
                 settings = SplunkSettings.model_validate(source.config)
-                catching_up = (source.checkpoint is not None and
-                               source.checkpoint < int(now()) - settings.lag - settings.window)
+                latest = int(now()) - settings.lag
+                current = (source.checkpoint if source.checkpoint is not None
+                           else latest - settings.lookback)
+                state_key = _tail_key(source.id)
+                tail_row = db.get(State, state_key)
+                tail = dict(tail_row.value) if tail_row else {}
+                signature = digest(source.config, source.credential)
+                # A changed source configuration must not merge a cursor from
+                # a different search. Old source.checkpoint is retained.
+                if tail.get("active") and tail.get("source_signature") != signature:
+                    tail = {**tail, "active": False, "reset_at": now()}
+                    set_state(db, state_key, tail)
+                if not tail.get("active") and current < latest - max(
+                        settings.window * 2, settings.interval * 2):
+                    anchor = max(current, latest - max(
+                        settings.window * 2, settings.interval * 2))
+                    tail = {
+                        "active": True, "start": anchor,
+                        "checkpoint": anchor, "last_poll": 0,
+                        "source_signature": signature, "started_at": now(),
+                    }
+                    set_state(db, state_key, tail)
+                if tail.get("active") and current >= int(tail["start"]):
+                    # The backfill range ends exactly where live began.
+                    source.checkpoint = max(current, int(tail["checkpoint"]))
+                    tail = {**tail, "active": False,
+                            "checkpoint": source.checkpoint, "merged_at": now()}
+                    set_state(db, state_key, tail)
+                    current = source.checkpoint
+
+                if tail.get("active"):
+                    gap = max(0, latest - int(tail["checkpoint"]))
+                    if (gap > settings.window or
+                            now() - float(tail.get("last_poll", 0)) >= settings.interval):
+                        enqueue(db, "tail_poll", {"origin": "scheduler"}, source_id=source.id)
+                        tail = {**tail, "last_poll": now()}
+                        set_state(db, state_key, tail)
+                catchup_limit = int(tail["start"]) if tail.get("active") else latest
+                catching_up = current < catchup_limit - settings.window
                 if (catching_up and not source.last_error or
                         now() - source.last_poll >= settings.interval):
-                    pending = db.scalar(
-                        select(func.count()).select_from(Job)
-                        .where(Job.status.in_(ACTIVE_JOB_STATUSES))) or 0
+                    pending = db.scalar(select(func.count()).select_from(Job).where(
+                        Job.status.in_(ACTIVE_JOB_STATUSES))) or 0
                     if pending >= 20:
                         break
                     enqueue(db, "poll", {"origin": "scheduler"}, source_id=source.id)
                     source.last_poll = now()
-        queued = list(db.scalars(
-            select(Job).where(Job.status == "queued",
-                              Job.kind.in_(COLLECTION_JOB_KINDS))
-            .order_by(Job.created).limit(30)))
-        # A test operation does not consume the durable analysis queue.
-        job = next((j for j in queued if j.kind == "test"), None)
+        queued = list(db.scalars(select(Job).where(
+            Job.status == "queued", Job.kind.in_(COLLECTION_JOB_KINDS))
+            .order_by(Job.created).limit(40)))
+        test_job = next((j for j in queued if j.kind == "test"), None)
+        tail_job = next((j for j in queued if j.kind == "tail_poll"), None)
+        job = test_job or (tail_job if can_poll else None)
         if not job and can_poll:
-            job = queued[0] if queued else None
+            job = next((j for j in queued if j.kind == "poll"), None)
     if not job:
         return False
     return run_job(
         engine, config, job.id, guard=guard,
-        defer_analysis=(job.kind == "poll"),
+        defer_analysis=(job.kind in ("poll", "tail_poll")),
         heartbeat_key="worker_ingest")
 
 
