@@ -4,7 +4,7 @@ import uuid
 from contextlib import contextmanager
 from sqlalchemy import (create_engine, event, Column, String, Integer, BigInteger,
                         Float, Boolean, JSON, Text, Index, ForeignKey, LargeBinary, select,
-                        update, inspect, text)
+                        update, inspect, text, MetaData, Table)
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from .config import Policy
 
@@ -260,8 +260,8 @@ def migrate_v2(engine, recover_interrupted=False):
             raise RuntimeError("No existing database schema; run deepsnout init")
         version = conn.execute(
             select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
-        if version == 2:
-            return "Schema is already v2"
+        if version in (2, 3):
+            return "Schema is already v" + str(version)
         if version != 1:
             raise RuntimeError("Expected existing schema v1; refusing unknown version")
         if conn.dialect.name == "postgresql":
@@ -284,12 +284,25 @@ def migrate_v2(engine, recover_interrupted=False):
                         error="Interrupted by explicit v2 upgrade; source checkpoint not advanced"))
         # v1->v2 must create the original v2 schema, not a future v3 table.
         # The schema-v3 upgrade below performs the new column additions.
-        original = StagedBatch.__table__
-        legacy = original.to_metadata(
-            __import__("sqlalchemy").MetaData(),
-            name="staged_batches")
-        for name in ("shard", "lane", "batch_parent", "store_bytes"):
-            legacy._columns.remove(legacy.c[name])
+        legacy = Table(
+            "staged_batches", MetaData(),
+            Column("id", String(64), primary_key=True),
+            Column("source_id", String(32)),
+            Column("namespace", String(80), nullable=False),
+            Column("cohort", String(80), nullable=False),
+            Column("collected_at", Float, nullable=False),
+            Column("ingestion_clock", Float, nullable=False),
+            Column("event_count", Integer, nullable=False),
+            Column("processed", Integer, nullable=False),
+            Column("compressed_events", LargeBinary),
+            Column("content_sha256", String(64), nullable=False),
+            Column("status", String(16), nullable=False),
+            Column("last_error", String(300), nullable=False),
+            Column("stats", JSON, nullable=False),
+            Column("attempts", Integer, nullable=False),
+            Column("finished", Float, nullable=False),
+        )
+        Index("ix_staged_batch_queue", legacy.c.status, legacy.c.collected_at)
         legacy.create(conn, checkfirst=True)
         conn.execute(update(State).where(State.key == "schema_version").values(value=2))
     return "Migrated schema v1 to v2"
