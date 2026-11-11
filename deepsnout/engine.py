@@ -170,7 +170,7 @@ def _preload_by_id(db, model, ids, chunk=500):
 def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="unassigned",
            historical=False, on_progress=None,
            counter_state_key="behavioral_discovery_pipeline",
-           last_ingest_state_key="last_ingest"):
+           last_ingest_state_key="last_ingest", baseline_incomplete=False):
     clock = now() if clock is None else clock
     cfg = policy(db)
     report = {"accepted": 0, "duplicates": 0, "outside_retention": 0,
@@ -347,9 +347,14 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
                 if rkey not in refs:
                     refs[rkey] = reference(db, host, ctx, e.app, e.ts, cfg)
                 ref = refs[rkey]
+                if baseline_incomplete:
+                    ref = {**ref, "historical_reference_incomplete": True}
             sample = {"image": e.image, "sha256": e.sha256, "parent": e.parent,
                       "parent_guid": e.parent_guid, "flags": e.flags,
-                      "reference": ref, "pointer": e.pointer, "warnings": e.warnings}
+                      "reference": ref, "pointer": e.pointer, "warnings": [
+                          *e.warnings, *(
+                              ["Historical catch-up is incomplete; baseline evidence may be partial."]
+                              if baseline_incomplete else [])]}
             if not historical:
                 if proc:
                     proc.created, proc.app, proc.location, proc.context = e.ts, e.app, e.location, ctx

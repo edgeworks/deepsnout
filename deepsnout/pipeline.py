@@ -13,7 +13,7 @@ import zlib
 
 from sqlalchemy import select, func, delete
 from sqlalchemy.orm import defer
-from .db import StagedBatch, now, transaction, set_state
+from .db import StagedBatch, State, now, transaction, set_state
 from .normalize import Event, digest
 from .engine import evaluate_windows
 
@@ -200,6 +200,16 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
             "clock": batch.ingestion_clock, "lane": batch.lane,
             "shard": batch.shard, "content_sha256": batch.content_sha256,
         }
+        if batch.lane == "live":
+            tail = db.get(State, "splunk_tail:" + batch.source_id) if batch.source_id else None
+            backfill_pending = db.scalar(select(func.count()).select_from(StagedBatch).where(
+                StagedBatch.source_id == batch.source_id,
+                StagedBatch.lane == "backfill",
+                StagedBatch.status.in_(ANALYSIS_STATES))) or 0
+            snapshot["baseline_incomplete"] = bool(
+                (tail and tail.value.get("active")) or backfill_pending)
+        else:
+            snapshot["baseline_incomplete"] = False
         # The compressed payload is large: read it only on a cache miss,
         # never during the 400-event transaction that advances a cursor.
         hit = cache.get(batch_id) if cache is not None else None
@@ -236,7 +246,8 @@ def process_next_batch(engine, *, progress=None, chunk_limit=ANALYSIS_CHUNK_EVEN
                     cohort=batch.cohort, clock=batch.ingestion_clock,
                     batch_id=digest("analyzed-chunk", batch_id, start, end),
                     counter_state_key="behavioral_discovery_pipeline:" + str(batch.shard),
-                    last_ingest_state_key="last_ingest:" + str(batch.shard))
+                    last_ingest_state_key="last_ingest:" + str(batch.shard),
+                    baseline_incomplete=snapshot["baseline_incomplete"])
                 stats = dict(batch.stats or {})
                 for field in ("accepted", "duplicates", "historical_input_events",
                               "live_input_events", "historical_ingest_seconds",

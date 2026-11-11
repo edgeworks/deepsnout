@@ -169,7 +169,8 @@ INGEST_COUNTER_FIELDS = (
 def ingest_age_partitioned(db, events, *, namespace, batch_id=None, clock=None,
                            cohort="unassigned", progress=None,
                            counter_state_key="behavioral_discovery_pipeline",
-                           last_ingest_state_key="last_ingest"):
+                           last_ingest_state_key="last_ingest",
+                           baseline_incomplete=False):
     """Ingest old events via the fast path, then live events, in one transaction.
 
     The caller owns the session and source checkpoint. Old entries precede
@@ -194,7 +195,8 @@ def ingest_age_partitioned(db, events, *, namespace, batch_id=None, clock=None,
             cohort=cohort, historical=historical,
             on_progress=report if progress is not None else None,
             counter_state_key=counter_state_key,
-            last_ingest_state_key=last_ingest_state_key)
+            last_ingest_state_key=last_ingest_state_key,
+            baseline_incomplete=baseline_incomplete)
         return result, round(time.monotonic() - start, 3)
 
     if not old or not live:
@@ -327,7 +329,8 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
                         start = int(tail["checkpoint"])
                         lane_end = latest
                     else:
-                        start = snapshot["checkpoint"] if snapshot["checkpoint"] is not None else latest - settings.lookback
+                        start = (snapshot["checkpoint"] if snapshot["checkpoint"] is not None
+                                 else int(tail.get("backfill_start", latest - settings.lookback)))
                         lane_end = min(latest, int(tail["start"])) if tail.get("active") else latest
                     backlog = max(0, latest - start)
                     catching_up = lane_end - start > settings.window * 2
@@ -670,6 +673,7 @@ def tick_ingest(engine, config, guard=lambda: None):
                         "active": True, "start": anchor,
                         "checkpoint": anchor, "last_poll": 0,
                         "source_signature": signature, "started_at": now(),
+                        "backfill_start": current,
                     }
                     set_state(db, state_key, tail)
                 if tail.get("active") and current >= int(tail["start"]):
