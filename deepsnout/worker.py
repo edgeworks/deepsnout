@@ -115,33 +115,46 @@ def enqueue(db, kind, payload=None, source_id=None):
 
 @contextlib.contextmanager
 def worker_lock(engine, config, role="analysis"):
-    lock_ids = {"analysis": 174220601, "ingest": 174220602, "insight": 174220603}
+    """Refuse any overlapping host-shard writers, not just identical roles."""
+    fixed = {"analysis": 174220601, "ingest": 174220602, "insight": 174220603}
     if role.startswith("analysis:"):
         shards = tuple(int(v) for v in role.removeprefix("analysis:").split(","))
-        if not shards or any(not 0 <= v < 4 for v in shards):
-            raise ValueError("Invalid analysis shards")
-        lock_ids[role] = 174220610 + sum(1 << v for v in set(shards))
-    if role not in lock_ids:
+        if not shards or len(set(shards)) != len(shards) or any(
+                not 0 <= v < 4 for v in shards):
+            raise ValueError("Invalid analysis shard lock")
+        keys = [174220610 + (1 << shard) for shard in sorted(shards)]
+    elif role in fixed:
+        keys = [fixed[role]]
+    else:
         raise ValueError("Unknown worker role")
     if engine.dialect.name == "postgresql":
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-            if not connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_ids[role]}):
-                raise RuntimeError("Another DeepSnout " + role + " worker owns the database lock")
-            pid = connection.scalar(text("SELECT pg_backend_pid()"))
-            def guard():
-                if connection.scalar(text("SELECT pg_backend_pid()")) != pid:
-                    raise RuntimeError("Worker lock connection was replaced; stop before writing")
+            held = []
             try:
+                for key in keys:
+                    if not connection.scalar(
+                            text("SELECT pg_try_advisory_lock(:key)"), {"key": key}):
+                        raise RuntimeError("Another DeepSnout writer owns a selected host shard")
+                    held.append(key)
+                pid = connection.scalar(text("SELECT pg_backend_pid()"))
+                def guard():
+                    if connection.scalar(text("SELECT pg_backend_pid()")) != pid:
+                        raise RuntimeError("Worker lock connection was replaced; stop before writing")
                 yield guard
             finally:
                 if not connection.invalidated:
-                    connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_ids[role]})
+                    for key in reversed(held):
+                        connection.execute(
+                            text("SELECT pg_advisory_unlock(:key)"), {"key": key})
     else:
-        with (config.data_dir / ("worker-" + role + ".lock")).open("w") as file:
-            try:
-                fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError("Another local worker is already running") from None
+        with contextlib.ExitStack() as stack:
+            for key in keys:
+                path = config.data_dir / ("worker-lock-" + str(key))
+                file = stack.enter_context(path.open("w"))
+                try:
+                    fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise RuntimeError("Another worker owns this host shard") from None
             yield lambda: None
 
 
