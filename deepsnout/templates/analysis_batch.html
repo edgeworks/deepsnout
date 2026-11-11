@@ -29,7 +29,7 @@
     <dt>Exception type</dt><dd>{{ failure.exception_type or 'Not recorded' }}</dd>
     <dt>PostgreSQL SQLSTATE</dt><dd>{{ failure.database_sqlstate or 'Not available' }}</dd>
     <dt>Failure occurred (UTC)</dt><dd>{{ failure.occurred_at|utc if failure.occurred_at else 'Not recorded' }}</dd>
-    <dt>Cursor before failure</dt><dd>{{ failure.cursor_before_failure if failure.cursor_before_failure is not none else 'Not recorded' }}</dd>
+    <dt>Cursor before failure</dt><dd>{{ failure.cursor_before_failure if failure.cursor_before_failure is defined and failure.cursor_before_failure is not none else 'Not recorded' }}</dd>
   </dl>
   {% if failure.hint %}<p class="muted">{{ failure.hint }}</p>{% endif %}
   <p class="muted">DeepSnout deliberately does not save raw exception messages or SQL parameters in the GUI because they may contain sensitive organization data. The complete exception and stack trace remain in the on-premises worker container logs. For older failures, even the structured stage and SQLSTATE may be unavailable.</p>
