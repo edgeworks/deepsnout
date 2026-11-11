@@ -814,6 +814,58 @@ def create_app(config=None):
             metrics["raw_observation_names_included"] = False
             return JSONResponse(metrics)
 
+    @app.get("/analysis/batches/{batch_id}")
+    def analysis_batch_detail(request: Request, batch_id: str):
+        """Operational metadata only: never deserialize the sensitive payload."""
+        with transaction(engine) as db:
+            user = login_user(request, db, {"admin"})
+            batch = db.execute(
+                select(
+                    StagedBatch.id, StagedBatch.batch_parent,
+                    StagedBatch.source_id, StagedBatch.lane, StagedBatch.shard,
+                    StagedBatch.status, StagedBatch.event_count,
+                    StagedBatch.processed, StagedBatch.collected_at,
+                    StagedBatch.ingestion_clock, StagedBatch.finished,
+                    StagedBatch.last_error, StagedBatch.attempts,
+                    StagedBatch.stats, StagedBatch.store_bytes,
+                ).where(StagedBatch.id == batch_id)
+            ).first()
+            if batch is None:
+                raise HTTPException(404, "Analysis batch not found")
+            source = db.get(Source, batch.source_id) if batch.source_id else None
+            stats = batch.stats if isinstance(batch.stats, dict) else {}
+            last_failure = stats.get("last_failure")
+            failure = {}
+            if isinstance(last_failure, dict):
+                # Whitelist fields; neither a raw exception nor a SQL statement
+                # should ever reach a browser or an exported status response.
+                failure = {
+                    name: last_failure.get(name)
+                    for name in (
+                        "occurred_at", "exception_type", "database_sqlstate",
+                        "stage", "cursor_before_failure", "hint",
+                    )
+                }
+            counters = {
+                name: stats.get(name)
+                for name in (
+                    "accepted", "duplicates", "historical_input_events",
+                    "live_input_events", "historical_ingest_seconds",
+                    "live_ingest_seconds", "network_findings_created",
+                    "evaluate_seconds",
+                )
+                if isinstance(stats.get(name), (int, float))
+                and not isinstance(stats.get(name), bool)
+            }
+            return view(
+                request, "analysis_batch.html", user=user, batch=batch,
+                source_name=source.name if source else "Unknown / removed",
+                failure=failure, counters=counters,
+                last_retry_at=stats.get("last_retry_at", 0),
+                committed_fraction=(batch.processed / batch.event_count
+                                    if batch.event_count else 1),
+            )
+
     @app.post("/analysis/batches/{batch_id}/retry")
     async def retry_analysis_batch(request: Request, batch_id: str):
         await form_data(request)
@@ -821,7 +873,7 @@ def create_app(config=None):
             user = login_user(request, db, {"admin"})
             retry_failed_batch(db, batch_id)
             audit(db, user.username, "analysis.batch.retry", batch_id)
-        return RedirectResponse("/operations", 303)
+        return RedirectResponse("/analysis/batches/" + batch_id, 303)
 
     @app.get("/operations")
     def operations(request: Request):
@@ -841,6 +893,18 @@ def create_app(config=None):
                        StagedBatch.last_error, StagedBatch.finished,
                        StagedBatch.shard, StagedBatch.lane)
                 .order_by(StagedBatch.collected_at.desc()).limit(15)).all()
+            # A failed batch may be hundreds of positions behind the newest
+            # collection. List failures separately instead of hiding them
+            # behind the 15 most recent records.
+            failed_batches = db.execute(
+                select(
+                    StagedBatch.id, StagedBatch.status,
+                    StagedBatch.event_count, StagedBatch.processed,
+                    StagedBatch.collected_at, StagedBatch.last_error,
+                    StagedBatch.shard, StagedBatch.lane, StagedBatch.attempts,
+                ).where(StagedBatch.status == "failed")
+                .order_by(StagedBatch.collected_at.desc()).limit(100)
+            ).all()
             collection_lags=[]
             live_collection_lags=[]
             for source in db.scalars(select(Source).where(
@@ -857,6 +921,7 @@ def create_app(config=None):
                 counts=counts,jobs=jobs,logs=logs,orphan=orphan,
                 psl=psl_available(),source_names=source_names,
                 pipeline=pipeline, staged_batches=staged,
+                failed_batches=failed_batches,
                 collection_lag_seconds=max(collection_lags) if collection_lags else None,
                 live_collection_lag_seconds=(
                     max(live_collection_lags) if live_collection_lags else None))
