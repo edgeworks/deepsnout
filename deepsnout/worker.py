@@ -107,11 +107,14 @@ def enqueue(db, kind, payload=None, source_id=None):
 
 
 @contextlib.contextmanager
-def worker_lock(engine, config):
+def worker_lock(engine, config, role="analysis"):
+    lock_ids = {"analysis": 174220601, "ingest": 174220602, "insight": 174220603}
+    if role not in lock_ids:
+        raise ValueError("Unknown worker role")
     if engine.dialect.name == "postgresql":
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-            if not connection.scalar(text("SELECT pg_try_advisory_lock(174220601)")):
-                raise RuntimeError("Another DeepSnout analysis worker owns the database lock")
+            if not connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_ids[role]}):
+                raise RuntimeError("Another DeepSnout " + role + " worker owns the database lock")
             pid = connection.scalar(text("SELECT pg_backend_pid()"))
             def guard():
                 if connection.scalar(text("SELECT pg_backend_pid()")) != pid:
@@ -120,9 +123,9 @@ def worker_lock(engine, config):
                 yield guard
             finally:
                 if not connection.invalidated:
-                    connection.execute(text("SELECT pg_advisory_unlock(174220601)"))
+                    connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_ids[role]})
     else:
-        with (config.data_dir / "worker.lock").open("w") as file:
+        with (config.data_dir / ("worker-" + role + ".lock")).open("w") as file:
             try:
                 fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -216,7 +219,8 @@ def ingest_age_partitioned(db, events, *, namespace, batch_id=None, clock=None,
     return result
 
 
-def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: None):
+def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: None,
+            defer_analysis=False, heartbeat_key="worker"):
     with transaction(engine) as db:
         job = db.get(Job, job_id)
         if job.status == "cancel_requested":
@@ -239,7 +243,7 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             return
         with transaction(engine) as heartbeat_db:
             current = heartbeat_db.get(Job, job_id)
-            set_state(heartbeat_db, "worker", {
+            set_state(heartbeat_db, heartbeat_key, {
                 "heartbeat": now(), "state": "running", "job_id": job_id,
                 "job_kind": kind, "job_started": started_at, "stage": stage,
                 "detail": detail or {},
@@ -371,22 +375,36 @@ def run_job(engine, config, job_id, client_factory=SplunkClient, guard=lambda: N
             if records is not None:
                 ingest_clock = now()
                 ingest_started = time.monotonic()
-                ingest_report = ingest_age_partitioned(
-                    db, records,
-                    namespace=snapshot["namespace"] if snapshot else payload.get("namespace", "default"),
-                    batch_id=payload.get("batch_id"), clock=ingest_clock,
-                    cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned",
-                    progress=progress)
-                result = {**result, **ingest_report}
-                result["ingest_seconds"] = round(time.monotonic() - ingest_started, 3)
-                if not ingest_report["live_input_events"]:
-                    result["window_evaluation_deferred"] = True
-                    result["evaluate_seconds"] = 0.0
+                if defer_analysis:
+                    if kind != "poll" or not snapshot or not payload.get("batch_id"):
+                        raise ValueError("Only complete Splunk poll slices can use the durable handoff")
+                    from .pipeline import stage_observations
+                    progress("stage-observations", {"total": len(records)})
+                    handoff = stage_observations(
+                        db, records, batch_id=payload["batch_id"],
+                        source_id=snapshot["id"], namespace=snapshot["namespace"],
+                        cohort=snapshot["config"].get("default_cohort", "unassigned"),
+                        collected_clock=ingest_clock)
+                    result.update(handoff)
+                    result["stage_seconds"] = round(time.monotonic() - ingest_started, 3)
+                    result["analysis_deferred"] = True
                 else:
-                    progress("evaluate-network", {"windows_limit": 2000})
-                    evaluate_started = time.monotonic()
-                    result["network_findings_created"] = evaluate_windows(db, clock=ingest_clock)
-                    result["evaluate_seconds"] = round(time.monotonic() - evaluate_started, 3)
+                    ingest_report = ingest_age_partitioned(
+                        db, records,
+                        namespace=snapshot["namespace"] if snapshot else payload.get("namespace", "default"),
+                        batch_id=payload.get("batch_id"), clock=ingest_clock,
+                        cohort=snapshot["config"].get("default_cohort", "unassigned") if snapshot else "unassigned",
+                        progress=progress)
+                    result = {**result, **ingest_report}
+                    result["ingest_seconds"] = round(time.monotonic() - ingest_started, 3)
+                    if not ingest_report["live_input_events"]:
+                        result["window_evaluation_deferred"] = True
+                        result["evaluate_seconds"] = 0.0
+                    else:
+                        progress("evaluate-network", {"windows_limit": 2000})
+                        evaluate_started = time.monotonic()
+                        result["network_findings_created"] = evaluate_windows(db, clock=ingest_clock)
+                        result["evaluate_seconds"] = round(time.monotonic() - evaluate_started, 3)
             if kind == "peer_groups":
                 result = refresh_peer_groups(db, progress=progress)
             if kind == "finding_quality":
