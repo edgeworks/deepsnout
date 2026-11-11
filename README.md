@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a28, experimental local-first pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a29, experimental local-first pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -175,6 +175,41 @@ The direct development server is intentionally separate from the Compose deploym
 Compose is HTTPS through Caddy. CI exercises SQLite, a disposable PostgreSQL DB,
 the Caddy certificate chain/redirect, and the Compose stack. Mock Splunk tests are
 not certification against your deployment.
+
+## Diagnose failed analysis batches (v0.1.0a29)
+
+**Operations → Failed analysis batches → Investigate / retry** now shows
+all active failed batches separately from the 15 most recent collections
+(up to 100 failures). Batch details include source, live/backfill lane,
+host shard, successful chunk offset, retries, and a safe failure
+category. New failures include processing stage, UTC timestamp and
+PostgreSQL SQLSTATE when present. Raw exception messages, SQL and
+organization telemetry stay in local worker logs; the batch page
+contains a command to correlate the exact batch ID with those logs.
+Older failures are still findable but cannot retroactively expose
+diagnostics their prior worker did not save.
+
+Retry is admin-only, CSRF-protected and resumes safely at the committed
+analysis offset. No re-ingestion from Splunk, schema migration, remote
+telemetry or automatic retry is required.
+
+**Upgrade from v0.1.0a28:** Take your usual coordinated PostgreSQL and
+application/database secret backups before changing application images.
+Schema v4 remains unchanged. From the project directory:
+
+```bash
+git pull --ff-only
+sudo --preserve-env=HTTP_PROXY,HTTPS_PROXY,NO_PROXY \
+  docker compose --progress=plain build \
+    --build-arg HTTP_PROXY \
+    --build-arg HTTPS_PROXY \
+    --build-arg NO_PROXY
+sudo docker compose up -d --no-build --remove-orphans
+sudo docker compose exec -T analysis-worker deepsnout version
+```
+
+Proxy environment variables must already be configured in the shell;
+do not embed proxy credentials in source or Dockerfiles.
 
 ## Faster historical and live analysis SQL (v0.1.0a28)
 

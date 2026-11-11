@@ -1,4 +1,47 @@
-# Verification report - 0.1.0a28
+# Verification report - 0.1.0a29
+
+## Batch-failure diagnostics in Operations (0.1.0a29)
+
+On a v0.1.0a28 deployment, the user reported that the analysis backlog
+was declining but one failed batch could not be located or explained
+from Operations. The old screen showed only the most recent 15 collected
+batches, so older failed shards fell off the visible list. The worker
+persisted only a generic exception type and kept the traceback in local
+logs, with no batch ID in the failure log line.
+
+The Operations page now lists up to the 100 newest FAILED analysis batches
+separately from the 15 most recently collected batches. Every staged
+batch has an admin-only details page with immutable batch/parent IDs,
+source, lane, host shard, committed offset/total, attempts, timestamps,
+safe error category and retry action. The failed count links directly
+to the dedicated failure section. A completed batch's raw compressed
+event data is never read, deserialized or rendered by these routes.
+
+New failures store a constrained dictionary under the existing
+`staged_batches.stats.last_failure` JSON field with the failure
+timestamp, processing stage, exception CLASS, PostgreSQL SQLSTATE when
+available, committed cursor, shard/lane and generic operational hint.
+They do not store raw exception text, SQL statements, SQL parameters,
+stack traces, hostnames, paths or command-line strings. The full
+exception continues to be logged only locally, now with the exact
+batch ID, stage, lane, shard and offset to aid correlation.
+
+Older already-failed batches remain visible with their previously
+stored generic `last_error` and progress; missing structured stage
+and SQLSTATE details are explicitly labeled unavailable. Their old
+container logs may not have included a batch ID, so investigation may
+require filtering by time and worker. Retrying is still admin-only,
+CSRF-protected and fully audited, and retains last-failure metadata
+while resuming at the previously committed cursor. NO automatic
+retry, cursor change, source re-poll, analytical suppression, new
+schema migration, or external telemetry is introduced.
+
+Tests cover an older failure hidden behind >15 newer batches,
+access/CSRF permissions, failure details and no accidental raw
+payload/SQL leak, preservation of failure metadata across retry,
+safe SQLSTATE capture and exact stage on a synthetic failed chunk.
+Actual production root cause must be checked against the stored
+metadata and local worker logs, not guessed from the synthetic tests.
 
 ## SQL I/O reduction for analysis workers (0.1.0a28)
 

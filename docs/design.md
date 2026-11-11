@@ -14,6 +14,24 @@ alternative. No broker, Redis, Node build chain, vector DB or externally loaded 
 A PostgreSQL session advisory lock prevents accidental parallel analysis writers;
 SQLite development uses flock. Normal GUI writes remain transactional.
 
+## Operational diagnostics for failed analysis batches (v0.1.0a29)
+
+A failed `StagedBatch` has its processing status and committed cursor
+saved in PostgreSQL; its normalized event payload remains private and
+durable. On a processing exception, the detector records an allowlisted
+error category, processing stage, timestamp, SQLSTATE (if present),
+and safe remediation hint in the existing `stats` JSON structure.
+No raw exception message, stacktrace or SQL parameters leave the local
+worker logs. Container log lines include the immutable batch ID for
+operator correlation; legacy failures may lack structured diagnostics.
+
+Operations lists failed batches independently of recent collections,
+provides an authenticated batch-detail page for investigation and
+allows CSRF-protected admin retry of remaining events only. Previously
+committed chunks and source collection checkpoints remain unchanged,
+and collection still does not depend on analysis success. The UI never
+queries or displays compressed observation payloads.
+
 ## Bounded network-window evaluation and local reference indexes (v0.1.0a28)
 
 The analyzer's per-batch network-window finalization previously ran an
