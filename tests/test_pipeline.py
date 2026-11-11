@@ -9,7 +9,7 @@ from sqlalchemy import select, func
 from conftest import CLOCK, DAY, evt, count
 from deepsnout.db import (
     transaction, Base, State, StagedBatch, Seen, Host, Process,
-    BatchReceipt, Source, Finding, initialize, migrate_v2, now,
+    BatchReceipt, Source, Finding, initialize, migrate_v2, migrate_v3, now,
 )
 from deepsnout.pipeline import (
     stage_observations, process_next_batch, queued_metrics, queue_has_room,
@@ -29,8 +29,8 @@ def _stage(db, records, *, token="first", clock=CLOCK, namespace="synthetic"):
         namespace=namespace, cohort="unassigned", collected_clock=clock)
 
 
-def test_schema_version_two_on_fresh_database(db):
-    assert db.get(State, "schema_version").value == 2
+def test_schema_version_three_on_fresh_database(db):
+    assert db.get(State, "schema_version").value == 3
     assert count(db, StagedBatch) == 0
 
 
@@ -44,10 +44,13 @@ def test_explicit_v1_migration_is_safe_and_preserves_existing_data(engine):
     with pytest.raises(RuntimeError, match="migrate-v2"):
         initialize(engine)
     assert migrate_v2(engine) == "Migrated schema v1 to v2"
+    with pytest.raises(RuntimeError, match="migrate-v3"):
+        initialize(engine)
+    assert migrate_v3(engine) == "Migrated schema v2 to v3"
     initialize(engine)
-    assert migrate_v2(engine) == "Schema is already v2"
+    assert migrate_v3(engine) == "Schema is already v3"
     with transaction(engine) as db:
-        assert db.get(State, "schema_version").value == 2
+        assert db.get(State, "schema_version").value == 3
         assert db.get(Host, "survives-v2") is not None
         assert count(db, StagedBatch) == 0
 
@@ -81,14 +84,15 @@ def test_staged_input_is_durable_before_analysis_and_payload_is_cleaned(engine):
     with transaction(engine) as db:
         stored = db.get(StagedBatch, "mixed")
         assert stored.status == "done" and stored.processed == 2
-        assert stored.compressed_events is None
+        assert stored.compressed_events is not None
+        assert stored.store_bytes == len(stored.compressed_events)
         assert stored.stats["accepted"] == 2
         assert stored.stats["historical_input_events"] == 1
         assert stored.stats["live_input_events"] == 1
         assert count(db, Seen) == 2
         assert count(db, Process) == 1  # Only the live event creates a Process row
         assert queued_metrics(db)["pending_events"] == 0
-        assert db.get(State, "analysis_cursor").value["status"] == "done"
+        assert db.get(State, "analysis_cursor:" + str(stored.shard)).value["status"] == "done"
     # A completed batch is immutable/never processed again.
     assert not process_next_batch(engine)
 
@@ -139,8 +143,8 @@ def test_failed_earlier_batch_cannot_be_bypassed(engine, monkeypatch):
     monkeypatch.setattr(worker, "ingest_age_partitioned", fail)
     assert not process_next_batch(engine)
     with transaction(engine) as db:
-        assert next_pending_batch(db).id == "first"
-        assert next_pending_batch(db).status == "failed"
+        assert next_pending_batch(db) is None
+        assert db.get(StagedBatch, "first").status == "failed"
         assert count(db, Seen) == 0
         assert queued_metrics(db)["failed_batches"] == 1
         with pytest.raises(ValueError):
@@ -158,9 +162,10 @@ def test_failed_earlier_batch_cannot_be_bypassed(engine, monkeypatch):
 
 def test_backpressure_preserves_existing_batch(monkeypatch, db):
     import deepsnout.pipeline as pipeline
-    monkeypatch.setattr(pipeline, "MAX_PENDING_EVENTS", 2)
     assert _stage(db, [evt(n=4300), evt(n=4301)])["staged_events"] == 2
-    with pytest.raises(BackpressureError, match="backlog"):
+    used = queued_metrics(db)["stored_bytes"]
+    monkeypatch.setattr(pipeline, "MAX_STORE_BYTES", used)
+    with pytest.raises(BackpressureError, match="byte budget"):
         _stage(db, [evt(n=4302)], token="overflow")
     assert count(db, StagedBatch) == 1
     assert not queue_has_room(db)
@@ -235,7 +240,7 @@ def test_source_checkpoint_rolls_back_if_staging_rejected(engine, config, monkey
         def slice(self, start, end):
             return [evt(n=4505, ts=CLOCK-80)], {"received": 1}, end
 
-    monkeypatch.setattr(pipeline, "MAX_PENDING_EVENTS", 0)
+    monkeypatch.setattr(pipeline, "MAX_STORE_BYTES", 0)
     assert not run_job(engine, config, job_id, client_factory=Client,
                        defer_analysis=True, heartbeat_key="worker_ingest")
     with transaction(engine) as db:

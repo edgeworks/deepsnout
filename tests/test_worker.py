@@ -93,13 +93,20 @@ def test_capacity_failure_does_not_advance(engine,config):
         assert db.get(Source,sid).checkpoint==CLOCK-600 and count(db,Seen)==0
 
 
-def test_queue_bound_and_coalescing(db):
+def test_queue_bound_and_distinct_live_source_jobs(db):
     import pytest
-    source=Source(name='test',config={}); db.add(source); db.flush()
-    a=enqueue(db,'test',source_id=source.id)
-    assert a.id==enqueue(db,'poll',source_id=source.id).id
-    for i in range(19): enqueue(db,'maintenance')
-    with pytest.raises(ValueError): enqueue(db,'demo')
+    source = Source(name="test", config={})
+    db.add(source); db.flush()
+    test_job = enqueue(db, "test", source_id=source.id)
+    poll = enqueue(db, "poll", source_id=source.id)
+    tail = enqueue(db, "tail_poll", source_id=source.id)
+    assert len({test_job.id, poll.id, tail.id}) == 3
+    assert enqueue(db, "poll", source_id=source.id).id == poll.id
+    assert enqueue(db, "tail_poll", source_id=source.id).id == tail.id
+    for i in range(17):
+        enqueue(db, "maintenance")
+    with pytest.raises(ValueError):
+        enqueue(db, "demo")
 
 
 def test_demo_removal_scoped_and_reloadable(engine,config):

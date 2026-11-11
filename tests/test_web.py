@@ -480,7 +480,8 @@ def test_operations_show_three_workers_and_safe_analysis_backlog(browser, engine
     page = browser.get("/operations")
     assert page.status_code == 200
     assert "Ingest worker" in page.text
-    assert "Detection worker" in page.text
+    assert "Detection · shards 0/2" in page.text
+    assert "Detection · shards 1/3" in page.text
     assert "Insight worker" in page.text
     assert "1</strong>" in page.text
     assert "Staged analysis batches" in page.text
@@ -492,7 +493,8 @@ def test_operations_show_three_workers_and_safe_analysis_backlog(browser, engine
     assert metrics["raw_observation_names_included"] is False
     assert "workstation.example" not in response.text
     assert "utility.exe" not in response.text
-    assert set(metrics["workers"]) == {"ingest", "analysis", "insight"}
+    assert set(metrics["workers"]) == {
+        "ingest", "analysis_0_2", "analysis_1_3", "insight"}
 
 
 def test_failed_batch_retry_requires_admin_and_preserves_cursor(browser, engine):
