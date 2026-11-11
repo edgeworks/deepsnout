@@ -14,7 +14,7 @@ from .security import initialize_secrets, validate_password, PASSWORDS
 
 def main():
     parser = argparse.ArgumentParser(prog="deepsnout")
-    parser.add_argument("command", choices=["secrets", "init", "migrate-v2", "serve", "ingest-worker",
+    parser.add_argument("command", choices=["secrets", "init", "migrate-v2", "migrate-v3", "serve", "ingest-worker",
         "analysis-worker", "insight-worker", "setup-token",
         "worker-health", "reset-password", "version", "validate-cohorts"])
     parser.add_argument("--host", default="127.0.0.1")
@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--username")
     parser.add_argument("--role", choices=["ingest", "analysis", "insight"],
                         default="analysis")
+    parser.add_argument("--shards", default="0,1,2,3",
+                        help="For analysis-worker: stable host shards, for example 0,2")
     parser.add_argument("--recover-interrupted", action="store_true",
                         help="With migrate-v2, mark stopped v1 jobs as failed")
     args = parser.parse_args()
@@ -68,6 +70,10 @@ def main():
         from .db import migrate_v2
         print(migrate_v2(engine, recover_interrupted=args.recover_interrupted))
         return
+    if args.command == "migrate-v3":
+        from .db import migrate_v3
+        print(migrate_v3(engine))
+        return
     if args.command == "validate-cohorts":
         from .temporal_validation import run_temporal_shadow_validation
         with transaction(engine) as db:
@@ -79,10 +85,16 @@ def main():
     elif args.command in ("ingest-worker", "analysis-worker", "insight-worker"):
         initialize(engine)
         from .worker import run_role
-        run_role(engine, config, args.command.removesuffix("-worker"))
+        role = args.command.removesuffix("-worker")
+        shards = tuple(int(v) for v in args.shards.split(",")) if role == "analysis" else None
+        run_role(engine, config, role, shards=shards)
     elif args.command == "worker-health":
         with transaction(engine) as db:
-            row = db.get(State, "worker_" + args.role)
+            key = "worker_" + args.role
+            if args.role == "analysis":
+                shards = tuple(sorted(set(int(v) for v in args.shards.split(","))))
+                key += "_" + "_".join(map(str, shards))
+            row = db.get(State, key)
             healthy = row and now() - row.value.get("heartbeat", 0) < 600
         sys.exit(0 if healthy else 1)
     elif args.command == "reset-password":

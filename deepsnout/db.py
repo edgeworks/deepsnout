@@ -324,7 +324,7 @@ def migrate_v3(engine):
         if version != 2:
             raise RuntimeError("Expected schema v2; upgrade v1 to v2 first")
         if conn.dialect.name == "postgresql":
-            for key in (174220601, 174220602, 174220603, 174220611, 174220612):
+            for key in (174220601, 174220602, 174220603, 174220615, 174220620, 174220625):
                 if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": key}):
                     raise RuntimeError("Worker still running; stop all workers before migration")
         columns = {col["name"] for col in inspect(conn).get_columns("staged_batches")}
