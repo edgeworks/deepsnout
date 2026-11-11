@@ -753,38 +753,42 @@ def tick_analysis(engine, config, guard=lambda: None, shards=None, cache=None):
 
 
 def tick_insight(engine, config, guard=lambda: None):
-    # Independent of source backlog. These jobs read committed historical
-    # summaries and findings; never handle live source cursors or raw batches.
-    _role_heartbeat(engine, "insight", "idle")
+    """Run expensive fleet discovery only when spare analytical capacity exists."""
+    from .pipeline import queued_metrics
     with transaction(engine) as db:
+        pressure = queued_metrics(db)
+        busy = (pressure["pending_events"] > 100_000 or
+                pressure["stored_bytes"] > pressure["store_budget_bytes"] * .7)
+        set_state(db, "worker_insight", {
+            "heartbeat": now(), "state": "paused-backlog" if busy else "idle",
+            "detail": {"pending_events": pressure["pending_events"],
+                       "stored_bytes": pressure["stored_bytes"]}})
         stamp = now()
-        peer_state = db.get(State, "peer_group_suggestions")
-        peer_updated = peer_state.value.get("updated_at", 0) if peer_state else 0
-        attempt = db.get(State, "peer_group_last_attempt")
-        peer_attempted = attempt.value.get("at", 0) if attempt else 0
-        if (db.scalar(select(func.count()).select_from(Host)) and
-                stamp - max(peer_updated, peer_attempted) >= 3600):
-            enqueue(db, "peer_groups", {"origin": "scheduler"})
-        quality_state = db.get(State, QUALITY_STATE_KEY)
-        quality_updated = quality_state.value.get("updated_at", 0) if quality_state else 0
-        quality_attempt = db.get(State, QUALITY_ATTEMPT_KEY)
-        quality_attempted = quality_attempt.value.get("at", 0) if quality_attempt else 0
-        if (db.scalar(select(func.count()).select_from(Finding)) and
-                stamp - max(quality_updated, quality_attempted) >= 3600):
-            enqueue(db, "finding_quality", {"origin": "scheduler"})
-        jobs = list(db.scalars(
-            select(Job).where(Job.status == "queued",
-                              Job.kind.in_(INSIGHT_JOB_KINDS))
-            .order_by(Job.created).limit(30)))
-        job = next((j for j in jobs
-                    if isinstance(j.payload, dict) and
-                    j.payload.get("origin") == "operator"), None)
-        job = job or (jobs[0] if jobs else None)
+        if not busy:
+            peer_state = db.get(State, "peer_group_suggestions")
+            peer_updated = peer_state.value.get("updated_at", 0) if peer_state else 0
+            attempt = db.get(State, "peer_group_last_attempt")
+            peer_attempted = attempt.value.get("at", 0) if attempt else 0
+            if (db.scalar(select(func.count()).select_from(Host)) and
+                    stamp - max(peer_updated, peer_attempted) >= 3600):
+                enqueue(db, "peer_groups", {"origin": "scheduler"})
+            quality_state = db.get(State, QUALITY_STATE_KEY)
+            quality_updated = quality_state.value.get("updated_at", 0) if quality_state else 0
+            quality_attempt = db.get(State, QUALITY_ATTEMPT_KEY)
+            quality_attempted = quality_attempt.value.get("at", 0) if quality_attempt else 0
+            if (db.scalar(select(func.count()).select_from(Finding)) and
+                    stamp - max(quality_updated, quality_attempted) >= 3600):
+                enqueue(db, "finding_quality", {"origin": "scheduler"})
+        jobs = list(db.scalars(select(Job).where(
+            Job.status == "queued", Job.kind.in_(INSIGHT_JOB_KINDS)
+        ).order_by(Job.created).limit(30)))
+        operator = next((j for j in jobs if isinstance(j.payload, dict)
+                         and j.payload.get("origin") == "operator"), None)
+        job = operator or (jobs[0] if jobs and not busy else None)
     if not job:
         return False
-    return run_job(
-        engine, config, job.id, guard=guard,
-        heartbeat_key="worker_insight")
+    return run_job(engine, config, job.id, guard=guard,
+                   heartbeat_key="worker_insight")
 
 
 def run_role(engine, config, role):
