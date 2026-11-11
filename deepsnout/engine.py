@@ -168,7 +168,9 @@ def _preload_by_id(db, model, ids, chunk=500):
 
 
 def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="unassigned",
-           historical=False, on_progress=None):
+           historical=False, on_progress=None,
+           counter_state_key="behavioral_discovery_pipeline",
+           last_ingest_state_key="last_ingest"):
     clock = now() if clock is None else clock
     cfg = policy(db)
     report = {"accepted": 0, "duplicates": 0, "outside_retention": 0,
@@ -445,7 +447,7 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
     if behavioral_counts:
         report["behavioral_pipeline"] = dict(behavioral_counts)
         current_day = int(clock) // DAY
-        state = db.get(State, "behavioral_discovery_pipeline")
+        state = db.get(State, counter_state_key)
         previous = (state.value.get("by_day", {}) if state and
                     isinstance(state.value, dict) else {})
         retained = {}
@@ -461,20 +463,28 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
         today = retained.setdefault(str(current_day), {})
         for label, count in behavioral_counts.items():
             today[label] = int(today.get(label, 0)) + count
-        set_state(db, "behavioral_discovery_pipeline", {
+        set_state(db, counter_state_key, {
             "schema": 1, "by_day": retained, "last_updated": clock})
     db.flush()
-    set_state(db, "last_ingest", {**report, "at": clock, "namespace": namespace})
+    set_state(db, last_ingest_state_key,
+              {**report, "at": clock, "namespace": namespace})
     return report
 
 
-def evaluate_windows(db, clock=None, limit=2000):
+def evaluate_windows(db, clock=None, limit=2000, host_ids=None):
     clock = now() if clock is None else clock
     cfg = policy(db)
-    db.execute(update(Window).where(Window.start < clock - DAY,
-                                   Window.evaluated.is_(False)).values(evaluated=True))
-    rows = list(db.scalars(select(Window).where(Window.evaluated.is_(False),
-                Window.start + WINDOW <= clock - 300).order_by(Window.start).limit(limit)))
+    old_windows = update(Window).where(
+        Window.start < clock - DAY, Window.evaluated.is_(False))
+    current_windows = select(Window).where(
+        Window.evaluated.is_(False), Window.start + WINDOW <= clock - 300)
+    if host_ids is not None:
+        if not host_ids:
+            return 0
+        old_windows = old_windows.where(Window.host_id.in_(host_ids))
+        current_windows = current_windows.where(Window.host_id.in_(host_ids))
+    db.execute(old_windows.values(evaluated=True))
+    rows = list(db.scalars(current_windows.order_by(Window.start).limit(limit)))
     references, created = {}, 0
     for w in rows:
         w.evaluated = True
