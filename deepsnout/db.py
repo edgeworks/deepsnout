@@ -124,6 +124,9 @@ class Coverage(Base):
     day = Column(Integer, nullable=False, index=True)
     event_id = Column(Integer, nullable=False)
     count = Column(BigInteger, nullable=False, default=0)
+    __table_args__ = (
+        Index("ix_coverage_host_event_day", "host_id", "event_id", "day"),
+    )
 
 
 class Seen(Base):
@@ -258,7 +261,7 @@ def make_engine(config):
     return engine
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def migrate_v2(engine, recover_interrupted=False):
@@ -272,7 +275,7 @@ def migrate_v2(engine, recover_interrupted=False):
             raise RuntimeError("No existing database schema; run deepsnout init")
         version = conn.execute(
             select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
-        if version in (2, 3):
+        if version in (2, 3, 4):
             return "Schema is already v" + str(version)
         if version != 1:
             raise RuntimeError("Expected existing schema v1; refusing unknown version")
@@ -331,8 +334,8 @@ def migrate_v3(engine):
             raise RuntimeError("No database; run deepsnout init")
         version = conn.execute(
             select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
-        if version == 3:
-            return "Schema is already v3"
+        if version in (3, 4):
+            return "Schema is already v" + str(version)
         if version != 2:
             raise RuntimeError("Expected schema v2; upgrade v1 to v2 first")
         if conn.dialect.name == "postgresql":
@@ -364,13 +367,80 @@ def migrate_v3(engine):
     return "Migrated schema v2 to v3"
 
 
+def migrate_v4(engine):
+    """Explicit index-only v3 -> v4 migration for SQL read performance.
+
+    PostgreSQL builds these indexes CONCURRENTLY (outside a transaction)
+    while existing collection remains available. The schema marker changes
+    only after all indexes are valid. No table rows or source cursors change.
+    For rollback or interrupted index creation, preserve the database backup.
+    """
+    with engine.begin() as conn:
+        if not inspect(conn).has_table("state"):
+            raise RuntimeError("No DeepSnout schema; run deepsnout init")
+        version = conn.execute(
+            select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
+        if version == 4:
+            return "Schema is already v4"
+        if version != 3:
+            raise RuntimeError("Expected schema v3; run earlier migrations first")
+
+    targets = ("ix_behavior_host_context_day", "ix_coverage_host_event_day",
+               "ix_window_active_host_start")
+    if engine.dialect.name == "postgresql":
+        # Keep v3 live collection running. A regular CREATE INDEX would block
+        # writes on the source database throughout the index build.
+        ddl = (
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_behavior_host_context_day "
+            "ON behavior_days (host_id, context, day)",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_coverage_host_event_day "
+            "ON coverage (host_id, event_id, day)",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_window_active_host_start "
+            "ON network_windows (host_id, start) WHERE evaluated IS FALSE",
+        )
+        with engine.connect().execution_options(
+                isolation_level="AUTOCOMMIT") as conn:
+            for statement in ddl:
+                conn.exec_driver_sql(statement)
+            # IF NOT EXISTS may silently reuse an invalid index left after
+            # a failed concurrent build. Never mark the schema upgraded then.
+            for name in targets:
+                valid = conn.scalar(text(
+                    "SELECT ix.indisvalid AND ix.indisready "
+                    "FROM pg_index ix JOIN pg_class c ON c.oid = ix.indexrelid "
+                    "WHERE c.relname = :name"
+                ), {"name": name})
+                if not valid:
+                    raise RuntimeError(
+                        "Index " + name + " is missing or invalid. "
+                        "Repair the index before retrying migrate-v4.")
+    else:
+        with engine.begin() as conn:
+            indexes = {idx.name: idx for model in (BehaviorDay, Coverage, Window)
+                       for idx in model.__table__.indexes}
+            for name in targets:
+                indexes[name].create(conn, checkfirst=True)
+
+    with engine.begin() as conn:
+        version = conn.execute(
+            select(State.value).where(State.key == "schema_version")).scalar_one_or_none()
+        if version != 3:
+            raise RuntimeError("Schema version changed during index migration")
+        conn.execute(update(State).where(State.key == "schema_version")
+                     .values(value=4))
+    return "Migrated schema v3 to v4"
+
+
 def initialize(engine):
     # Check the deployed schema BEFORE creating new tables on an existing DB.
     if inspect(engine).has_table("state"):
         with sessionmaker(engine).begin() as db:
             version = db.get(State, "schema_version")
             if not version or version.value != SCHEMA_VERSION:
-                migration = "migrate-v2" if version and version.value == 1 else "migrate-v3"
+                migrations = {1: "migrate-v2", 2: "migrate-v3", 3: "migrate-v4"}
+                migration = migrations.get(version.value) if version else "init"
+                if not migration:
+                    raise RuntimeError("Unknown DeepSnout schema version")
                 raise RuntimeError(
                     "Database schema upgrade required. Back up PostgreSQL and secrets, "
                     "stop all workers, then run 'deepsnout " + migration + "'.")

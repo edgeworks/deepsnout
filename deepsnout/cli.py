@@ -14,7 +14,7 @@ from .security import initialize_secrets, validate_password, PASSWORDS
 
 def main():
     parser = argparse.ArgumentParser(prog="deepsnout")
-    parser.add_argument("command", choices=["secrets", "init", "migrate-v2", "migrate-v3", "serve", "ingest-worker",
+    parser.add_argument("command", choices=["secrets", "init", "migrate-v2", "migrate-v3", "migrate-v4", "serve", "ingest-worker",
         "analysis-worker", "insight-worker", "setup-token",
         "worker-health", "reset-password", "version", "validate-cohorts"])
     parser.add_argument("--host", default="127.0.0.1")
@@ -73,6 +73,10 @@ def main():
     if args.command == "migrate-v3":
         from .db import migrate_v3
         print(migrate_v3(engine))
+        return
+    if args.command == "migrate-v4":
+        from .db import migrate_v4
+        print(migrate_v4(engine))
         return
     if args.command == "validate-cohorts":
         from .temporal_validation import run_temporal_shadow_validation
