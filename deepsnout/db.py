@@ -92,6 +92,7 @@ class StagedBatch(Base):
     content_sha256 = Column(String(64), nullable=False)
     status = Column(String(16), nullable=False, default="pending")
     last_error = Column(String(300), nullable=False, default="")
+    stats = Column(JSON, nullable=False, default=dict)
     attempts = Column(Integer, nullable=False, default=0)
     finished = Column(Float, nullable=False, default=0)
     __table_args__ = (Index("ix_staged_batch_queue", "status", "collected_at"),)
