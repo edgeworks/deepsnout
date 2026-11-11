@@ -799,8 +799,12 @@ def create_app(config=None):
             login_user(request, db)
             metrics = queued_metrics(db)
             workers = {}
-            for role in ("ingest", "analysis", "insight"):
-                state = db.get(State, "worker_" + role)
+            for role, key in (
+                    ("ingest", "worker_ingest"),
+                    ("analysis_0_2", "worker_analysis_0_2"),
+                    ("analysis_1_3", "worker_analysis_1_3"),
+                    ("insight", "worker_insight")):
+                state = db.get(State, key)
                 value = state.value if state else {}
                 workers[role] = {
                     "last_heartbeat": value.get("heartbeat"),
@@ -834,19 +838,28 @@ def create_app(config=None):
             staged=db.execute(
                 select(StagedBatch.id, StagedBatch.status, StagedBatch.event_count,
                        StagedBatch.processed, StagedBatch.collected_at,
-                       StagedBatch.last_error, StagedBatch.finished)
+                       StagedBatch.last_error, StagedBatch.finished,
+                       StagedBatch.shard, StagedBatch.lane)
                 .order_by(StagedBatch.collected_at.desc()).limit(15)).all()
-            collection_lags=[
-                max(0, int(now())-source.checkpoint)
-                for source in db.scalars(select(Source).where(
-                    Source.enabled.is_(True), Source.checkpoint.is_not(None)))
-            ]
+            collection_lags=[]
+            live_collection_lags=[]
+            for source in db.scalars(select(Source).where(
+                    Source.enabled.is_(True))):
+                tail = states.get("splunk_tail:" + source.id, {})
+                if source.checkpoint is not None:
+                    collection_lags.append(max(0, int(now()) - source.checkpoint))
+                current = (tail.get("checkpoint") if tail.get("active")
+                           else source.checkpoint)
+                if current is not None:
+                    live_collection_lags.append(max(0, int(now()) - current))
             return view(
                 request,"operations.html",user=user,states=states,
                 counts=counts,jobs=jobs,logs=logs,orphan=orphan,
                 psl=psl_available(),source_names=source_names,
                 pipeline=pipeline, staged_batches=staged,
-                collection_lag_seconds=max(collection_lags) if collection_lags else None)
+                collection_lag_seconds=max(collection_lags) if collection_lags else None,
+                live_collection_lag_seconds=(
+                    max(live_collection_lags) if live_collection_lags else None))
 
     @app.get("/settings")
     def settings_page(request: Request):
@@ -949,23 +962,31 @@ def create_app(config=None):
                 Finding.detector == "DS-BEH-001",
                 Finding.created >= now() - 7 * 86400)) or 0)
             cfg = policy(db)
-            state = db.get(State, "behavioral_discovery_pipeline")
-            pipeline = state.value if state else {}
+            states = [db.get(State, key) for key in (
+                "behavioral_discovery_pipeline",
+                "behavioral_discovery_pipeline:0",
+                "behavioral_discovery_pipeline:1",
+                "behavioral_discovery_pipeline:2",
+                "behavioral_discovery_pipeline:3")]
+            pipelines = [row.value for row in states if row and isinstance(row.value, dict)]
             today = int(now()) // 86400
             pipeline_last_7d = {}
-            for bucket_day, counters in pipeline.get("by_day", {}).items():
-                if (not isinstance(counters, dict)
-                        or not str(bucket_day).lstrip("-").isdigit()
-                        or not today - 6 <= int(bucket_day) <= today):
-                    continue
-                for label, count in counters.items():
-                    if isinstance(count, int) and not isinstance(count, bool):
-                        pipeline_last_7d[label] = pipeline_last_7d.get(label, 0) + count
+            for pipeline in pipelines:
+                for bucket_day, counters in pipeline.get("by_day", {}).items():
+                    if (not isinstance(counters, dict)
+                            or not str(bucket_day).lstrip("-").isdigit()
+                            or not today - 6 <= int(bucket_day) <= today):
+                        continue
+                    for label, count in counters.items():
+                        if isinstance(count, int) and not isinstance(count, bool):
+                            pipeline_last_7d[label] = pipeline_last_7d.get(label, 0) + count
+            pipeline_updated = max(
+                (float(row.get("last_updated") or 0) for row in pipelines), default=0)
             return {
                 "detector": "DS-BEH-001",
                 "behavioral_enabled": cfg.behavioral_enabled,
                 "evaluation_pipeline_last_7d": pipeline_last_7d,
-                "evaluation_last_updated": pipeline.get("last_updated"),
+                "evaluation_last_updated": pipeline_updated,
                 "evaluation_window": "last seven processing UTC days, including today",
                 "evaluation_counts_are_events_not_distinct_hosts": True,
                 "findings_total": sum(by_state.values()),
