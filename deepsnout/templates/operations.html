@@ -32,15 +32,33 @@
     <div><span>Historical catch-up lag</span><strong>{{ '%.1f h'|format(collection_lag_seconds/3600) if collection_lag_seconds is not none else 'Unknown' }}</strong><small>Oldest source index-time checkpoint</small></div>
     <div><span>Pending analysis</span><strong>{{ '{:,}'.format(pipeline.pending_events) }}</strong><small>{{ pipeline.pending_batches }} batches · live {{ '{:,}'.format(pipeline.lanes.live.pending_events) }} · background {{ '{:,}'.format(pipeline.lanes.backfill.pending_events) }}</small></div>
     <div><span>Oldest analysis batch</span><strong>{{ '%.1f h'|format(pipeline.oldest_batch_age_seconds/3600) if pipeline.pending_batches else 'None' }}</strong><small>Time since collection, not event time</small></div>
-    <div><span>Failed analysis batches</span><strong class="{{ 'warn-text' if pipeline.failed_batches else 'good-text' }}">{{ pipeline.failed_batches }}</strong><small>Only affected analysis lane/shard stops; collection continues</small></div>
+    <div><span>Failed analysis batches</span><strong class="{{ 'warn-text' if pipeline.failed_batches else 'good-text' }}">{{ pipeline.failed_batches }}</strong><small>Only affected lane/shard stops; collection continues. {% if pipeline.failed_batches %}<a href="#failed-analysis">Inspect failures</a>{% endif %}</small></div>
     <div><span>Retained observation storage</span><strong>{{ '%.2f GiB'|format(pipeline.stored_bytes/1073741824) }}</strong><small>Budget {{ '%.1f GiB'|format(pipeline.store_budget_bytes/1073741824) }} · {{ pipeline.store_retention_days }} days after analysis; not a disk-free measurement</small></div>
   </div>
   <p class="muted">Live ingestion stays prioritized over historical catch-up. Collection atomically stores all host shards with its index-time cursor. Two detection workers analyze disjoint host partitions, giving live work priority between 400-event chunks. Analysis failures do not block collection unless the protected observation-store byte budget is reached.</p>
   <details><summary>Last committed analysis cursors</summary><pre>{{ {'0':states.get('analysis_cursor:0',{}),'1':states.get('analysis_cursor:1',{}),'2':states.get('analysis_cursor:2',{}),'3':states.get('analysis_cursor:3',{})}|pretty }}</pre></details>
   <p class="muted"><a href="/api/pipeline/metrics">Counts-only pipeline status (authenticated)</a>. No raw observations are included.</p>
 </section>
+<section class="panel table-scroll" id="failed-analysis">
+  <h2>Failed analysis batches ({{ pipeline.failed_batches }})</h2>
+  <p class="muted">Failures remain visible even after hundreds of newer batches arrive. Inspect the batch details before retrying; a failed analysis chunk does not undo previously committed chunks or the Splunk collection checkpoint. Showing up to 100 newest failures.</p>
+  <table>
+    <thead><tr><th>Collected (UTC)</th><th>Lane</th><th>Shard</th><th>Progress</th><th>Error summary</th><th>Attempts</th><th>Inspect</th></tr></thead>
+    <tbody>
+      {% for f in failed_batches %}
+      <tr>
+        <td>{{ f.collected_at|utc }}</td><td>{{ f.lane }}</td><td>{{ f.shard }}</td>
+        <td>{{ '{:,}'.format(f.processed) }} / {{ '{:,}'.format(f.event_count) }}</td>
+        <td>{{ f.last_error or 'No structured error recorded' }}</td>
+        <td>{{ f.attempts }}</td>
+        <td><a href="/analysis/batches/{{ f.id }}">Investigate / retry</a></td>
+      </tr>
+      {% else %}<tr><td colspan="7">No failed analysis batches.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
 <section class="panel table-scroll">
-  <h2>Staged analysis batches</h2>
+  <h2>Recently collected analysis batches</h2>
   <table>
     <thead><tr><th>Collected (UTC)</th><th>Lane</th><th>Host shard</th><th>Status</th><th>Analyzed / total</th><th>Age</th><th>Error</th><th>Action</th></tr></thead>
     <tbody>
@@ -48,16 +66,11 @@
       <tr>
         <td>{{ b.collected_at|utc }}</td>
         <td>{{ b.lane }}</td><td>{{ b.shard }}</td>
-        <td>{{ b.status }}</td>
+        <td><a href="/analysis/batches/{{ b.id }}">{{ b.status }}</a></td>
         <td>{{ '{:,}'.format(b.processed) }} / {{ '{:,}'.format(b.event_count) }}</td>
         <td>{{ '%.1f min'|format((now-b.collected_at)/60) }}</td>
         <td>{{ b.last_error or '—' }}</td>
-        <td>{% if b.status == 'failed' %}
-          <form method="post" action="/analysis/batches/{{ b.id }}/retry">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button class="quiet">Retry remaining events</button>
-          </form>
-        {% else %}—{% endif %}</td>
+        <td><a href="/analysis/batches/{{ b.id }}">{{ 'Investigate / retry' if b.status == 'failed' else 'Details' }}</a></td>
       </tr>
       {% else %}<tr><td colspan="8">No staged batches yet.</td></tr>{% endfor %}
     </tbody>

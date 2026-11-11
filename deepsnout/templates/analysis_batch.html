@@ -1,0 +1,67 @@
+{% extends 'base.html' %}
+{% block title %}Analysis batch · DeepSnout{% endblock %}
+{% block content %}
+<a class="back" href="/operations#failed-analysis">&larr; Operations / failed analysis</a>
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">ANALYSIS CHECKPOINT AND FAILURE DIAGNOSTICS</p>
+    <h1>Analysis batch</h1>
+    <p>Local operational metadata only. No raw event payload, SQL statement or command line is displayed.</p>
+  </div>
+  <a class="button" href="/operations">All operations</a>
+</header>
+<section class="stats">
+  <div><span>Status</span><strong class="{{ 'warn-text' if batch.status=='failed' else 'good-text' if batch.status=='done' else '' }}">{{ batch.status|capitalize }}</strong><small>Lane: {{ batch.lane }} · host shard {{ batch.shard }}</small></div>
+  <div><span>Completed observations</span><strong>{{ '{:,}'.format(batch.processed) }} / {{ '{:,}'.format(batch.event_count) }}</strong><small>{{ '%.1f'|format(committed_fraction*100) }}% committed in independently resumable chunks</small></div>
+  <div><span>Failed attempts</span><strong>{{ batch.attempts }}</strong><small>Last retry: {{ last_retry_at|utc if last_retry_at else 'Not retried' }}</small></div>
+</section>
+<section class="panel">
+  <h2>What happened?</h2>
+  {% if batch.last_error or failure %}
+    <p class="notice danger">{{ batch.last_error or failure.exception_type or 'Analysis failed' }}</p>
+  {% elif batch.status=='failed' %}
+    <p class="notice danger">The batch is marked failed, but no error summary was retained.</p>
+  {% else %}
+    <p class="notice">No active error. The batch may be queued, processing or completed.</p>
+  {% endif %}
+  <dl>
+    <dt>Failure stage</dt><dd>{{ failure.stage or 'Not recorded (older worker version)' }}</dd>
+    <dt>Exception type</dt><dd>{{ failure.exception_type or 'Not recorded' }}</dd>
+    <dt>PostgreSQL SQLSTATE</dt><dd>{{ failure.database_sqlstate or 'Not available' }}</dd>
+    <dt>Failure occurred (UTC)</dt><dd>{{ failure.occurred_at|utc if failure.occurred_at else 'Not recorded' }}</dd>
+    <dt>Cursor before failure</dt><dd>{{ failure.cursor_before_failure if failure.cursor_before_failure is not none else 'Not recorded' }}</dd>
+  </dl>
+  {% if failure.hint %}<p class="muted">{{ failure.hint }}</p>{% endif %}
+  <p class="muted">DeepSnout deliberately does not save raw exception messages or SQL parameters in the GUI because they may contain sensitive organization data. The complete exception and stack trace remain in the on-premises worker container logs. For older failures, even the structured stage and SQLSTATE may be unavailable.</p>
+  <h3>Find the corresponding local logs</h3>
+  <p>For new failures, search for the exact batch ID. For failures recorded before this release, search both detector-worker logs around the failure period.</p>
+  <pre>sudo docker compose logs --since=24h analysis-worker analysis-worker-b | grep -F '{{ batch.id }}'</pre>
+  {% if batch.status == 'failed' %}
+  <form method="post" action="/analysis/batches/{{ batch.id }}/retry">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button>Retry remaining {{ '{:,}'.format(batch.event_count-batch.processed) }} observations</button>
+  </form>
+  <p class="muted">Retry resumes at the last committed observation. Inspect resource, integrity and database errors before retrying; no source re-poll is required.</p>
+  {% endif %}
+</section>
+<section class="panel">
+  <h2>Batch provenance</h2>
+  <dl>
+    <dt>Batch ID</dt><dd><code>{{ batch.id }}</code></dd>
+    <dt>Parent collection ID</dt><dd><code>{{ batch.batch_parent }}</code></dd>
+    <dt>Source</dt><dd>{{ source_name }}</dd>
+    <dt>Collection committed (UTC)</dt><dd>{{ batch.collected_at|utc }}</dd>
+    <dt>Captured analysis clock (UTC)</dt><dd>{{ batch.ingestion_clock|utc }}</dd>
+    <dt>Analysis completed (UTC)</dt><dd>{{ batch.finished|utc if batch.finished else 'Not yet' }}</dd>
+    <dt>Retained compressed payload</dt><dd>{{ '%.2f MiB'|format(batch.store_bytes/1048576) }} (not displayed)</dd>
+  </dl>
+  {% if counters %}
+  <h3>Committed work counters</h3>
+  <dl>
+    {% for name,value in counters.items() %}
+    <dt>{{ name|replace('_',' ')|capitalize }}</dt><dd>{{ value }}</dd>
+    {% endfor %}
+  </dl>
+  {% endif %}
+</section>
+{% endblock %}
