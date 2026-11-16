@@ -199,10 +199,10 @@ def test_expired_network_windows_are_excluded_without_bulk_updates(db):
         db.flush()
     finally:
         sql_event.remove(db.bind, "before_cursor_execute", monitor)
+    # Retired DS-NET-001 performs no window evaluation and no writes.
     assert not old.evaluated
-    assert new.evaluated
-    # The only UPDATE may be a bounded ORM flush by row primary key.
-    assert all(" WHERE network_windows.id " in statement for statement in observed)
+    assert not new.evaluated
+    assert not observed
 
 
 def test_v4_composite_and_partial_indexes_survive_explicit_migration(engine):
