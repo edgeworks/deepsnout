@@ -14,6 +14,7 @@ from .normalize import digest, VERSION
 from .features import Diversity, service_group
 from .peer_groups import peer_group_suppression_allowed
 from .environment_novelty import environment_novelty
+from .finding_quality import matching_family_expectation
 
 DAY = 86400
 WINDOW = 1800
@@ -23,7 +24,7 @@ SCRIPT_APPS = {"powershell.exe", "pwsh.exe", "mshta.exe", "regsvr32.exe", "cmd.e
 USER_LOCATIONS = {"temporary", "downloads", "user-profile", "network-share"}
 UNUSUAL_PARENTS = {"winword.exe", "excel.exe", "outlook.exe", "powerpnt.exe",
                    "chrome.exe", "msedge.exe", "firefox.exe"}
-EXPECTABLE = {"DS-EXEC-002", "DS-NET-001", "DS-BEH-001"}
+EXPECTABLE = {"DS-EXEC-002", "DS-BEH-001"}
 
 
 class CapacityError(RuntimeError):
@@ -80,6 +81,11 @@ def make_finding(db, host, detector, context, ts, title, summary, evidence, prio
         existing.last_seen = max(existing.last_seen, ts)
         existing.occurrences += 1
         return existing
+    # Only analyst-approved, time-limited family expectations can suppress
+    # future low-priority DS-BEH-001 discoveries. Group prevalence alone cannot.
+    if (detector == "DS-BEH-001" and priority != "high"
+            and matching_family_expectation(db, host.namespace, detector, evidence)):
+        return None
     if detector in EXPECTABLE:
         expectation = db.scalar(select(Expectation).where(
             Expectation.host_id == host.id, Expectation.detector == detector,
@@ -477,66 +483,12 @@ def ingest(db, events, namespace="default", batch_id=None, clock=None, cohort="u
 
 
 def evaluate_windows(db, clock=None, limit=2000, host_ids=None):
-    clock = now() if clock is None else clock
-    cfg = policy(db)
-    # Previously every 400-event batch ran an unbounded UPDATE over every
-    # expired, unevaluated network window for the hosts in that batch. This
-    # repeatedly read historical table pages even when no detection was due.
-    # Expired windows are ineligible for live detection; retention eventually
-    # removes them. Exclude them with a bounded indexed SELECT, without any
-    # write to the historic rows. Preserve the original 24h eligibility cutoff.
-    current_windows = select(Window).where(
-        Window.evaluated.is_(False),
-        Window.start >= clock - DAY,
-        Window.start <= clock - 300 - WINDOW)
-    if host_ids is not None:
-        if not host_ids:
-            return 0
-        current_windows = current_windows.where(Window.host_id.in_(host_ids))
-    rows = list(db.scalars(current_windows.order_by(Window.start).limit(limit)))
-    references, created = {}, 0
-    for w in rows:
-        w.evaluated = True
-        if not cfg.network_enabled:
-            continue
-        day_start = (w.start // DAY) * DAY
-        key = (w.host_id, w.app, w.location, w.kind, day_start)
-        if key not in references:
-            references[key] = list(db.execute(select(Window.start, Window.distinct_count).where(
-                Window.host_id == w.host_id, Window.app == w.app, Window.location == w.location,
-                Window.kind == w.kind, Window.start >= day_start - cfg.baseline_days * DAY,
-                Window.start < day_start, Window.reference_ok.is_(True))))
-        baseline = references[key]
-        days = len({r.start // DAY for r in baseline})
-        if days < cfg.minimum_days or len(baseline) < 8:
-            continue
-        values = sorted(r.distinct_count for r in baseline)
-        p95 = values[max(0, math.ceil(len(values) * .95) - 1)]
-        threshold = max(cfg.network_floor, p95 * cfg.network_factor, p95 + cfg.network_floor / 2)
-        if w.distinct_count <= threshold:
-            continue
-        previous = db.scalar(select(Window).where(Window.host_id == w.host_id,
-            Window.app == w.app, Window.location == w.location, Window.kind == w.kind,
-            Window.start == w.start - WINDOW))
-        if not previous or previous.distinct_count <= threshold:
-            continue
-        host = db.get(Host, w.host_id)
-        evidence = {"app": w.app, "location": w.location, "metric": w.kind,
-            "current": w.distinct_count, "previous": previous.distinct_count,
-            "window_minutes": WINDOW // 60, "interval_start": previous.start,
-            "interval_end": w.start + WINDOW, "baseline_median": statistics.median(values),
-            "baseline_p95": p95, "baseline_windows": len(values), "baseline_days_observed": days,
-            "reference_before": day_start, "threshold": threshold, "samples": w.samples,
-            "limitations": ["Diversity is a HyperLogLog estimate (about 6.5% standard error).",
-                "Two adjacent 30-minute windows exceed the local reference; intent is unknown.",
-                "No DNS-to-IP causal association is inferred."]}
-        finding = make_finding(db, host, "DS-NET-001", digest(w.app, w.location),
-            w.start + WINDOW, "Sustained network change in " + w.app,
-            "Destination diversity exceeded this application's prior local range in two consecutive active windows.", evidence)
-        if finding:
-            created += 1
-            w.reference_ok = previous.reference_ok = False
-    return created
+    """DS-NET-001 is retired; keep this callable for existing worker imports.
+
+    Historical network windows remain available to offline fleet analyses.
+    No new network findings are generated and no network-evaluation query runs.
+    """
+    return 0
 
 
 def maintenance(db, clock=None):

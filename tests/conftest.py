@@ -5,7 +5,7 @@ import time
 import pytest
 from sqlalchemy import select, func
 from deepsnout.config import Config
-from deepsnout.db import Base, make_engine, initialize, transaction
+from deepsnout.db import Base, make_engine, initialize, transaction, policy, set_state
 from deepsnout.security import initialize_secrets
 from deepsnout.normalize import normalize
 
@@ -49,6 +49,13 @@ def engine(config):
     if config.database_url:
         Base.metadata.drop_all(engine)
     initialize(engine)
+    # Legacy tests explicitly exercise retired detector internals. New installs
+    # keep them disabled, while the synthetic test database opts them in.
+    with transaction(engine) as db:
+        cfg = policy(db)
+        cfg.execution_enabled = True
+        cfg.contextual_enabled = True
+        set_state(db, 'policy', cfg.model_dump())
     yield engine
     engine.dispose()
 

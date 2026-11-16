@@ -17,9 +17,9 @@ class Policy(BaseModel):
     dedup_hours: int = Field(48, ge=6, le=168)
     maximum_receipts: int = Field(2000000, ge=10000, le=100000000)
     maximum_contexts_per_host_day: int = Field(2000, ge=50, le=100000)
-    execution_enabled: bool = True
-    contextual_enabled: bool = True
-    network_enabled: bool = True
+    execution_enabled: bool = False
+    contextual_enabled: bool = False
+    network_enabled: bool = False
     behavioral_enabled: bool = True
     behavioral_min_fleet_hosts: int = Field(50, ge=20, le=10000)
     behavioral_min_common_app_hosts: int = Field(15, ge=5, le=1000)

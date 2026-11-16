@@ -6,7 +6,7 @@ DeepSnout turns existing endpoint telemetry into explainable investigation
 findings. It compares recent behavior with local history and suitable application
 peers rather than ranking computers by lifetime counts of rare hashes or IPs.
 
-**Status: 0.1.0a29, experimental local-first pilot.** Not a validated EDR, a SIEM, a
+**Status: 0.1.0a30, experimental local-first pilot.** Not a validated EDR, a SIEM, a
 production-capacity promise, or a probability-of-compromise model. Start with a
 limited source and known examples. See [the exact verification boundary](docs/testing.md).
 
@@ -36,9 +36,12 @@ remaining stable Event 15 payload fields. No binary EVTX reader.
   discovery is deferred while a source is catching up. Historical catch-up older
   than the live finding horizon uses bulk baseline prefetching and skips temporary
   ProcessGuid/reference work that cannot create a current finding. Historical window finalization only touches summaries actually processed in the batch, avoiding failures when a preloaded window belongs to an event later skipped by retention/deduplication.
-- Three local detectors: remote-execution characteristics; new launch contexts
-  with exact-GUID-attributed outbound activity; sustained application-level
-  destination-diversity changes. Findings have deterministic explanations.
+- DS-BEH-001 rare execution / environment-relative discovery remains enabled.
+  DS-EXEC-001 and DS-EXEC-002 are disabled by default and remain available as
+  optional legacy detectors. DS-NET-001 is retired; historical network features
+  can still support exploratory analysis. Existing databases require an explicit
+  cleanup to disable saved legacy policy and remove DS-NET-001 findings.
+  See [Finding-Family cleanup](docs/finding-family-cleanup.md).
 - Explainable **automatic peer-group discovery** from bounded behavioral summaries.
   Suggestions begin as soon as useful endpoint observations exist rather than
   waiting for a 28-day baseline. The v2 layer compares broad application footprints,
@@ -55,7 +58,9 @@ remaining stable Event 15 payload fields. No binary EVTX reader.
   temporary process metadata and fixed-size approximate diversity summaries.
 - Investigation inbox, endpoint/discovery views, evidence export, decisions,
   exact-scope expiring expectations, source health, retention controls, audit and
-  local administrator/analyst/viewer accounts.
+  local administrator/analyst/viewer accounts. Analyst-reviewed Finding-Family
+  cleanup can close new benign family members in bulk, with optional 7–30-day
+  scoped expectations for future DS-BEH-001 findings.
 - Synthetic demo through the **same parser and analysis engine**, clearly marked
   and removable from the GUI. It is not a canned list of findings.
 - Bundled Caddy edge service: HTTPS from first boot, HTTP-to-HTTPS redirect and a

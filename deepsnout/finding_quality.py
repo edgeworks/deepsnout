@@ -9,18 +9,20 @@ Do not interpret a shared filename shape or a fleet-wide wave as benign:
 a coordinated intrusion can produce exactly the same observations.
 """
 from collections import Counter, defaultdict
+from types import SimpleNamespace
 import hashlib
 import ntpath
 import re
 
 from sqlalchemy import select
 
-from .db import Finding, Host, State, now, set_state
+from .db import Finding, Host, State, now, set_state, audit
 
-METHOD = "finding-family-shadow-v1"
+METHOD = "finding-family-v1"
 STATE_KEY = "finding_quality_snapshot"
 ATTEMPT_KEY = "finding_quality_last_attempt"
-WINDOW_DAYS = 7
+WINDOW_DAYS = None  # All currently open findings, not a recent time slice
+EXPECTATIONS_KEY = "finding_family_expectations"
 MAX_SOURCE_FINDINGS = 20000
 MAX_VISIBLE_FAMILIES = 30
 MIN_FAMILY_FINDINGS = 5
@@ -89,6 +91,104 @@ def _candidate(finding, host):
     return key, basename
 
 
+def _fingerprint(key):
+    return hashlib.sha256(repr(key).encode("utf-8")).hexdigest()[:24]
+
+
+def family_signature(namespace, detector, evidence):
+    """Exactly the same grouping identity for stored and prospective findings."""
+    f = SimpleNamespace(detector=detector, evidence=evidence)
+    host = SimpleNamespace(namespace=namespace)
+    candidate = _candidate(f, host)
+    return _fingerprint(candidate[0]) if candidate else None
+
+
+def family_expectations(db):
+    record = db.get(State, EXPECTATIONS_KEY)
+    return dict(record.value) if record and isinstance(record.value, dict) else {}
+
+
+def matching_family_expectation(db, namespace, detector, evidence, clock=None):
+    if detector != "DS-BEH-001":
+        return False
+    identifier = family_signature(namespace, detector, evidence)
+    if not identifier:
+        return False
+    expectation = family_expectations(db).get(identifier)
+    return bool(expectation and expectation.get("expires", 0) > (
+        now() if clock is None else clock))
+
+
+def review_family(db, identifier, actor, reason, suppress_days=0):
+    """Close reviewed *new* findings, optionally expect future exact family matches.
+
+    Never close investigating, malicious or high-priority findings. New events
+    are suppressible only for DS-BEH-001, for at most 30 days, by human approval.
+    """
+    clock = now()
+    reason = reason.strip()
+    if not 10 <= len(reason) <= 500:
+        raise ValueError("Provide a review reason of 10-500 characters")
+    if suppress_days not in (0, 7, 14, 30):
+        raise ValueError("Expectation duration must be 0, 7, 14 or 30 days")
+    snapshot = finding_quality_state(db)
+    if not snapshot or clock - snapshot.get("updated_at", 0) > 24 * 3600:
+        raise ValueError("Finding-family snapshot is missing or stale; refresh it")
+    family = next((g for g in snapshot.get("families", [])
+                   if g.get("id") == identifier), None)
+    if family is None:
+        raise ValueError("Family not in the current reviewed snapshot")
+    if suppress_days and family["detector"] != "DS-BEH-001":
+        raise ValueError("Future expectations are restricted to DS-BEH-001")
+    if suppress_days and (family["malicious_findings"] or family["high_priority_findings"]):
+        raise ValueError("Do not expect a family containing malicious/high-priority findings")
+    ids = family["member_ids"]
+    if len(ids) > MAX_SOURCE_FINDINGS:
+        raise ValueError("Family exceeds bounded review capacity")
+    changed = 0
+    for offset in range(0, len(ids), 400):
+        chunk = ids[offset:offset + 400]
+        rows = db.execute(
+            select(Finding, Host).join(Host, Finding.host_id == Host.id)
+            .where(Finding.id.in_(chunk))).all()
+        for finding, host in rows:
+            if family_signature(host.namespace, finding.detector,
+                                finding.evidence) != identifier:
+                raise ValueError("Family membership changed; refresh and review again")
+            if suppress_days and finding.state in ("malicious", "investigating"):
+                raise ValueError("Investigating/malicious findings cannot authorize a future expectation")
+            if finding.state == "new" and finding.priority != "high":
+                finding.state = "expected"
+                finding.active_key = None
+                finding.closed = clock
+                changed += 1
+        db.flush()
+    if suppress_days:
+        entries = family_expectations(db)
+        entries[identifier] = {
+            "expires": clock + suppress_days * 86400,
+            "owner": actor, "reason": reason,
+            "namespace": family["namespace"],
+            "detector": family["detector"],
+            "pattern": family["family_pattern"],
+        }
+        set_state(db, EXPECTATIONS_KEY, entries)
+    audit(db, actor, "finding_family.reviewed", identifier,
+          "Marked {} new findings expected; future={}d; reason={}".format(
+              changed, suppress_days, reason))
+    set_state(db, STATE_KEY, None)  # Force a fresh grouping after bulk changes.
+    return changed
+
+
+def revoke_family(db, identifier, actor):
+    entries = family_expectations(db)
+    if identifier not in entries:
+        raise ValueError("No family expectation to revoke")
+    entries.pop(identifier)
+    set_state(db, EXPECTATIONS_KEY, entries)
+    audit(db, actor, "finding_family.revoked", identifier)
+
+
 def summarize_finding_rows(rows, clock):
     """Deterministic, bounded snapshot. The input must already be time-scoped."""
     by_shape = defaultdict(list)
@@ -111,8 +211,7 @@ def summarize_finding_rows(rows, clock):
         representative = _consensus(filenames, shape)
         variant_count = len(filenames)
         version_churn = "{number}" in shape and variant_count >= VERSION_CHURN_MIN_VARIANTS
-        fingerprint = hashlib.sha256(
-            repr(key).encode("utf-8")).hexdigest()[:24]
+        fingerprint = _fingerprint(key)
         members.sort(key=lambda item: (-item[0].last_seen, item[0].id))
         families.append({
             "id": fingerprint,
@@ -161,9 +260,10 @@ def summarize_finding_rows(rows, clock):
     snapshot = {
         "method": METHOD,
         "updated_at": clock,
-        "window_start": clock - WINDOW_DAYS * 86400,
+        "window_start": None,
         "window_end": clock,
-        "window_days": WINDOW_DAYS,
+        "window_days": None,
+        "scope": "all-open",
         "source_findings": source_count,
         "findings_with_process_evidence": in_scope,
         "families_discovered": len(families),
@@ -197,8 +297,7 @@ def refresh_finding_quality(db, clock=None):
     clock = now() if clock is None else clock
     query = (select(Finding, Host)
              .join(Host, Finding.host_id == Host.id)
-             .where(Finding.created >= clock - WINDOW_DAYS * 86400,
-                    Finding.created <= clock,
+             .where(Finding.state.in_(("new", "investigating", "malicious")),
                     Host.namespace != "demo")
              .order_by(Finding.last_seen.desc(), Finding.id.asc())
              .limit(MAX_SOURCE_FINDINGS + 1))

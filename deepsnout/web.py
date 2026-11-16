@@ -26,7 +26,8 @@ from .worker import enqueue
 from .pipeline import queued_metrics, retry_failed_batch
 from .engine import EXPECTABLE
 from .finding_table import finding_csv, finding_table_row
-from .finding_quality import finding_quality_state, metrics_from_snapshot
+from .finding_quality import (finding_quality_state, metrics_from_snapshot,
+                              family_expectations, review_family, revoke_family)
 from .features import psl_available
 from .analytical_cohorts import analytical_cohort_state, anonymized_cohort_metrics
 from .peer_groups import (suggestion_state, peer_group_catalog, approve_suggestion,
@@ -494,9 +495,14 @@ def create_app(config=None):
             jobs = list(db.scalars(
                 select(Job).where(Job.kind == "finding_quality")
                 .order_by(Job.created.desc()).limit(4)))
+            active_expectations = [
+                {"id": identifier, **entry}
+                for identifier, entry in family_expectations(db).items()
+                if entry.get("expires", 0) > now()
+            ]
             return view(request, "finding_quality.html", user=user,
                         report=snapshot, attempt=attempt.value if attempt else None,
-                        quality_jobs=jobs)
+                        quality_jobs=jobs, active_expectations=active_expectations)
 
     @app.post("/finding-quality/refresh")
     async def finding_quality_refresh(request: Request):
@@ -537,7 +543,33 @@ def create_app(config=None):
                 report=report, family=family, rows=rows,
                 page=page, page_size=page_size,
                 has_previous=page > 1,
-                has_next=page*page_size < len(ids))
+                has_next=page*page_size < len(ids),
+                active_expectation=(
+                    family_expectations(db).get(family_id)
+                    if family_expectations(db).get(family_id, {}).get("expires", 0) > now()
+                    else None))
+
+    @app.post("/finding-quality/families/{family_id}/review")
+    async def finding_quality_family_review(request: Request, family_id: str):
+        form = await form_data(request)
+        if str(form.get("confirm", "")).strip() != "MARK EXPECTED":
+            raise ValueError("Type MARK EXPECTED to confirm this bulk change")
+        days = int(str(form.get("days", "0"))) if form.get("suppress_future") else 0
+        with transaction(engine) as db:
+            user = login_user(request, db, {"admin", "analyst"})
+            review_family(db, family_id, user.username,
+                          str(form.get("reason", "")), days)
+            enqueue(db, "finding_quality", {
+                "origin": "operator", "requested_by": user.username})
+        return RedirectResponse("/finding-quality", 303)
+
+    @app.post("/finding-quality/families/{family_id}/revoke")
+    async def finding_quality_family_revoke(request: Request, family_id: str):
+        await form_data(request)
+        with transaction(engine) as db:
+            user = login_user(request, db, {"admin", "analyst"})
+            revoke_family(db, family_id, user.username)
+        return RedirectResponse("/finding-quality", 303)
 
     @app.get("/api/finding-quality/metrics")
     def finding_quality_metrics(request: Request):
@@ -935,8 +967,9 @@ def create_app(config=None):
     async def settings_update(request: Request):
         form=await form_data(request)
         values={k:form[k] for k in Policy.model_fields if k in form}
-        for k in ("execution_enabled","contextual_enabled","network_enabled","behavioral_enabled"):
+        for k in ("execution_enabled","contextual_enabled","behavioral_enabled"):
             values[k]=form.get(k)=="on"
+        values["network_enabled"] = False  # DS-NET-001 is retired
         new=Policy.model_validate(values)
         with transaction(engine) as db:
             user=login_user(request,db,{"admin"}); set_state(db,"policy",new.model_dump())
