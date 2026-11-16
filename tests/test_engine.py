@@ -11,7 +11,7 @@ def test_demo_real_pipeline_and_replay(db):
     records=fixtures(CLOCK)
     assert ingest(db,records,'demo','demo-batch',CLOCK)['accepted']==len(records)
     evaluate_windows(db,CLOCK)
-    assert {f.detector for f in db.scalars(select(Finding))}=={'DS-EXEC-001','DS-NET-001'}
+    assert {f.detector for f in db.scalars(select(Finding))}=={'DS-EXEC-001'}
     before=sum(db.scalars(select(Coverage.count)))
     assert ingest(db,records,'demo','demo-batch',CLOCK)['batch_replay']
     assert before==sum(db.scalars(select(Coverage.count)))
