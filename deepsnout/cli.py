@@ -16,7 +16,8 @@ def main():
     parser = argparse.ArgumentParser(prog="deepsnout")
     parser.add_argument("command", choices=["secrets", "init", "migrate-v2", "migrate-v3", "migrate-v4", "serve", "ingest-worker",
         "analysis-worker", "insight-worker", "setup-token",
-        "worker-health", "reset-password", "version", "validate-cohorts"])
+        "worker-health", "reset-password", "version", "validate-cohorts",
+        "retire-legacy-detectors"])
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--username")
@@ -26,6 +27,8 @@ def main():
                         help="For analysis-worker: stable host shards, for example 0,2")
     parser.add_argument("--recover-interrupted", action="store_true",
                         help="With migrate-v2, mark stopped v1 jobs as failed")
+    parser.add_argument("--confirm", action="store_true",
+                        help="Confirm permanent deletion of DS-NET-001 findings")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.command == "version":
@@ -77,6 +80,19 @@ def main():
     if args.command == "migrate-v4":
         from .db import migrate_v4
         print(migrate_v4(engine))
+        return
+    if args.command == "retire-legacy-detectors":
+        from .cleanup import preview_retirement, retire_legacy_detectors
+        initialize(engine)
+        with transaction(engine) as db:
+            preview = preview_retirement(db)
+            if args.confirm:
+                print(json.dumps(retire_legacy_detectors(db), indent=2, sort_keys=True))
+            else:
+                print(json.dumps(preview, indent=2, sort_keys=True))
+                print("Preview only. Back up PostgreSQL and stop the workers, "
+                      "then rerun with --confirm to disable DS-EXEC-001/002 "
+                      "and permanently delete DS-NET-001 findings.")
         return
     if args.command == "validate-cohorts":
         from .temporal_validation import run_temporal_shadow_validation
