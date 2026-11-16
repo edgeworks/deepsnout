@@ -35,13 +35,13 @@ def post(path, data):
         return response.read().decode()
 
 
-def wait_for(count):
+def wait_for_endpoints(count):
     for _ in range(60):
         state = json.loads(get("/api/status"))
-        if state["open_findings"] == count:
+        if state["endpoints"] == count:
             return state
         time.sleep(1)
-    raise RuntimeError("Worker did not produce the expected state; inspect Compose logs")
+    raise RuntimeError("Worker did not ingest/remove demo endpoints; inspect Compose logs")
 
 
 def main():
@@ -54,10 +54,11 @@ def main():
     post("/login", {"username": "ci-admin", "password": password})
     assert json.loads(get("/api/status"))["endpoints"] == 0
     post("/demo", {})
-    state = wait_for(2)
-    assert state["endpoints"] == 2
+    state = wait_for_endpoints(2)
+    # Legacy DS-EXEC-001 and DS-NET-001 are disabled on fresh installs.
+    assert state["open_findings"] == 0
     post("/demo/remove", {})
-    state = wait_for(0)
+    state = wait_for_endpoints(0)
     assert state["endpoints"] == 0
     print("Compose HTTPS setup, login, worker analysis and scoped demo removal passed.")
 
