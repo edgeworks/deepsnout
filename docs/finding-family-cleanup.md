@@ -14,14 +14,14 @@ defaults does **not** disable previously enabled DS-EXEC-001/002 settings.
 Stop all worker containers before the cleanup so no detections race the update.
 Deploy the new code, then run from the updated web container:
 
-\`\`\`bash
+```bash
 docker compose stop ingest-worker analysis-worker analysis-worker-b insight-worker
 docker compose up -d --no-deps web
 docker compose exec -T web deepsnout retire-legacy-detectors
 # Inspect preview counts; this does not change any data.
 docker compose exec -T web deepsnout retire-legacy-detectors --confirm
 docker compose up -d
-\`\`\`
+```
 
 The confirmed action permanently deletes only findings and exact-scope
 expectations belonging to DS-NET-001. DS-EXEC-001 and DS-EXEC-002 findings
