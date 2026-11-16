@@ -51,16 +51,13 @@ def test_real_demo_finding_lifecycle(browser,engine,config):
     jid=r.headers['location'].split('/')[-1]
     assert run_job(engine,config,jid) and browser.get('/jobs/'+jid).status_code==200
     with transaction(engine) as db: ids=[(f.id,f.detector) for f in db.scalars(select(Finding))]
-    assert len(ids)==2 and 'SYNTHETIC' in browser.get('/').text
+    assert len(ids)==1 and 'SYNTHETIC' in browser.get('/').text
     for fid,detector in ids:
         assert browser.get('/findings/'+fid).status_code==200
         assert browser.get('/findings/'+fid+'/export').status_code==200
         assert post(browser,'/findings/'+fid+'/state',state='investigating',reason='Review original source logs').status_code==303
-        if detector=='DS-NET-001':
-            assert browser.get('/findings/'+fid+'/expect').status_code==200
-            assert post(browser,'/findings/'+fid+'/expect',days='30',reason='Approved workstation workload').status_code==303
-        else:
-            assert post(browser,'/findings/'+fid+'/expect',days='30',reason='Should not suppress this detector').status_code==400
+        assert post(browser,'/findings/'+fid+'/expect',days='30',
+                    reason='Should not suppress this detector').status_code==400
     with transaction(engine) as db:
         host=db.scalar(select(Host)); hid=host.id
     assert browser.get('/endpoints/'+hid).status_code==200
@@ -606,3 +603,53 @@ def test_batch_detail_requires_admin(browser, engine, config):
     assert browser.get("/analysis/batches/not-present").status_code == 403
     assert browser.get("/operations").status_code == 403
     assert post(browser, "/analysis/batches/not-present/retry").status_code == 403
+
+
+def test_family_review_bulk_closure_future_expectation_and_revoke(browser, engine, config):
+    from deepsnout.db import State
+    from deepsnout.worker import enqueue
+    with transaction(engine) as db:
+        _seed_finding_quality_example(db)
+        jid = enqueue(db, "finding_quality", {"origin": "operator"}).id
+    assert run_job(engine, config, jid)
+    with transaction(engine) as db:
+        identifier = db.get(State, "finding_quality_snapshot").value["families"][0]["id"]
+
+    path = "/finding-quality/families/" + identifier
+    assert "MARK EXPECTED" in browser.get(path).text
+    assert post(browser, path + "/review", reason="Documented known updater",
+                confirm="wrong").status_code == 400
+    assert post(browser, path + "/review",
+                reason="Documented known updater",
+                confirm="MARK EXPECTED", suppress_future="on", days="14").status_code == 303
+
+    with transaction(engine) as db:
+        counts = [(f.detector, f.state) for f in db.scalars(select(Finding))]
+        assert counts.count(("DS-BEH-001", "expected")) == 18
+        assert counts.count(("DS-NET-001", "new")) == 2
+        expectation = db.get(State, "finding_family_expectations").value[identifier]
+        assert expectation["expires"] > expectation.get("created", 0)
+        assert db.get(State, "finding_quality_snapshot").value is None
+    assert identifier in browser.get("/finding-quality").text
+    assert post(browser, path + "/revoke").status_code == 303
+    with transaction(engine) as db:
+        assert identifier not in db.get(State, "finding_family_expectations").value
+
+
+def test_family_review_blocks_future_suppression_when_malicious(browser, engine, config):
+    from deepsnout.db import State
+    from deepsnout.worker import enqueue
+    with transaction(engine) as db:
+        _seed_finding_quality_example(db)
+        bad = db.scalar(select(Finding).where(Finding.detector == "DS-BEH-001"))
+        bad.state = "malicious"
+        jid = enqueue(db, "finding_quality", {"origin": "operator"}).id
+    assert run_job(engine, config, jid)
+    with transaction(engine) as db:
+        identifier = db.get(State, "finding_quality_snapshot").value["families"][0]["id"]
+    response = post(browser, "/finding-quality/families/" + identifier + "/review",
+                    reason="Suspected mixed malicious family", confirm="MARK EXPECTED",
+                    suppress_future="on", days="14")
+    assert response.status_code == 400
+    with transaction(engine) as db:
+        assert db.scalar(select(Finding).where(Finding.state == "expected")) is None
